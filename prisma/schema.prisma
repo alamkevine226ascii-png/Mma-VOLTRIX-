@@ -1,0 +1,232 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ===========================================================================
+// MODULE MMA — indépendant du moteur football
+// ===========================================================================
+
+model MmaEvent {
+  id            String    @id @default(cuid())
+  externalId    String    @unique // ex: "espn:ufc:event:600061400"
+  providerId    String // "espn"
+  organization  String // "UFC" | "PFL" | "BELLATOR"
+  name          String
+  shortName     String?
+  date          DateTime
+  status        String // PROGRAMME | CONFIRME | REPORTE | ANNULE | TERMINE | EN_COURS
+  rawStatus     String? // statut brut du fournisseur (ex: pre/post/in)
+  venueName     String?
+  city          String?
+  country       String?
+  detailsSynced Boolean   @default(false) // détails par combat (catégorie, rounds) récupérés
+  lastSyncedAt  DateTime
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  fights        MmaFight[]
+
+  @@index([date])
+  @@index([status])
+  @@index([organization])
+}
+
+model MmaFight {
+  id               String    @id @default(cuid())
+  externalId       String    @unique // ex: "espn:competition:401932013"
+  eventId          String
+  event            MmaEvent  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  weightClass      String? // "Lightweight" — null si non disponible
+  scheduledRounds  Int? // 3 ou 5 — null si non disponible
+  cardSegment      String? // "Main Card" | "Prelims" | "Early Prelims"
+  matchNumber      Int?
+  status           String // PROGRAMME | CONFIRME | REPORTE | ANNULE | TERMINE | EN_COURS
+  rawStatus        String?
+  resultMethod     String? // KO_TKO | SOUMISSION | DECISION | null si inconnu
+  resultDetail     String? // texte lisible de la méthode si disponible
+  durationSeconds  Int? // durée du combat terminé (formule validée, cf types.ts)
+  winnerExternalId String?
+  completedAt      DateTime?
+  lastSyncedAt     DateTime
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  fighters         MmaFightFighter[]
+
+  @@index([eventId])
+  @@index([status])
+}
+
+model MmaFighter {
+  id             String    @id @default(cuid())
+  externalId     String    @unique // ex: "espn:athlete:5037883"
+  providerId     String
+  fullName       String
+  normalizedName String // dédoublonnage inter-sources (minuscules, sans accents)
+  nickname       String?
+  imageUrl       String?
+  nationality    String?
+  flagUrl        String?
+  birthDate      DateTime?
+  heightCm       Float?
+  reachCm        Float?
+  weightLbs      Float?
+  weightClass    String?
+  stance         String? // Orthodox / Southpaw / Switch
+  fightingStyle  String?
+  active         Boolean?
+  wins           Int?
+  losses         Int?
+  draws          Int?
+  noContests     Int?
+  winsByKo       Int?
+  winsBySub      Int?
+  titleWins      Int?
+  lastResults    String? // ex: "W,W,L,W,W" (les plus récents d'abord)
+  profileSynced  Boolean   @default(false)
+  sourceUrl      String?
+  lastSyncedAt   DateTime
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  stats          MmaFighterStats?
+  history        MmaFightHistory[]
+  derived        MmaDerivedStats[]
+  fights         MmaFightFighter[]
+
+  @@index([normalizedName])
+  @@index([fullName])
+}
+
+model MmaFighterStats {
+  id                     String      @id @default(cuid())
+  fighterId              String      @unique
+  fighter                MmaFighter   @relation(fields: [fighterId], references: [id], onDelete: Cascade)
+  sigStrikesLandedPerMin Float? // SLpM — frappes significatives portées par minute
+  strikingAccuracy       Float? // % (0-100)
+  takedownsPer15Min      Float? // takedowns réussis par 15 min
+  takedownAccuracy       Float? // %
+  submissionsPer15Min    Float? // soumissions tentées par 15 min
+  koPercentage           Float?
+  tkoPercentage          Float?
+  decisionPercentage     Float?
+  sourceUrl              String?
+  syncedAt               DateTime
+
+  @@index([fighterId])
+}
+
+model MmaFightFighter {
+  id             String     @id @default(cuid())
+  fightId        String
+  fight          MmaFight   @relation(fields: [fightId], references: [id], onDelete: Cascade)
+  fighterId      String
+  fighter        MmaFighter @relation(fields: [fighterId], references: [id], onDelete: Cascade)
+  corner         Int? // 1 ou 2
+  isWinner       Boolean?
+  recordAtFight  String? // palmarès affiché au moment du combat, ex "10-2-0"
+  syncedAt       DateTime
+
+  @@unique([fightId, fighterId])
+}
+
+// Historique des combats (source : common v3 eventsMap — 1 requête par combattant)
+model MmaFightHistory {
+  id                 String     @id @default(cuid())
+  fighterId          String
+  fighter            MmaFighter  @relation(fields: [fighterId], references: [id], onDelete: Cascade)
+  externalFightKey   String     @unique // uid ESPN complet "s:3301~l:3321~e:xxx~c:yyy"
+  espnEventId        String?
+  espnCompetitionId  String?
+  espnLeagueId       String? // 3321=UFC, 3347=PFL, 3323=Bellator
+  eventName          String?
+  eventDate          DateTime
+  result             String // W | L | D | NC
+  opponentName       String
+  opponentExternalId String?
+  titleFight         Boolean?
+  syncedAt           DateTime
+
+  @@index([fighterId, eventDate])
+}
+
+// Statistiques dérivées (SApM, défenses, temps moyen) — calculées à la demande
+// sur une fenêtre explicite, jamais extrapolées
+model MmaDerivedStats {
+  id                     String   @id @default(cuid())
+  fighterId              String
+  fighter                MmaFighter @relation(fields: [fighterId], references: [id], onDelete: Cascade)
+  windowSize             Int // nombre de combats utilisés pour le calcul
+  sigStrikesAbsorbedPerMin Float? // SApM
+  strikingDefense        Float? // %
+  takedownDefense        Float? // %
+  avgFightSeconds        Float?
+  avgSigStrikesLanded    Float?
+  avgSigStrikesAttempted Float?
+  avgTakedownsLanded     Float?
+  avgTakedownsAttempted  Float?
+  computedFrom           String // liste des clés de combats utilisées (JSON)
+  computedAt             DateTime
+
+  @@unique([fighterId, windowSize])
+}
+
+// ===========================================================================
+// MODULE FOOTBALL — moteur isolé, ne pas modifier pour le MMA
+// ===========================================================================
+
+model FootballMatch {
+  id           String   @id @default(cuid())
+  externalId   String   @unique // ex: "espn:eng.1:401234567"
+  league       String // "eng.1"
+  leagueName   String
+  homeTeam     String
+  awayTeam     String
+  homeTeamAbbr String?
+  awayTeamAbbr String?
+  homeLogo     String?
+  awayLogo     String?
+  date         DateTime
+  status       String // PROGRAMME | EN_COURS | TERMINE
+  rawStatus    String?
+  homeScore    Int?
+  awayScore    Int?
+  venue        String?
+  lastSyncedAt DateTime
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([date])
+  @@index([league])
+}
+
+// ===========================================================================
+// NOYAU PARTAGÉ — cache, journaux de synchronisation
+// ===========================================================================
+
+model ApiCache {
+  key       String   @id // "espn:/mma/ufc/scoreboard?..."
+  payload   String // JSON sérialisé
+  fetchedAt DateTime
+  expiresAt DateTime
+
+  @@index([expiresAt])
+}
+
+model SyncLog {
+  id           String    @id @default(cuid())
+  module       String // "mma" | "football"
+  job          String // "events" | "event-details" | "fighters" | "full"
+  status       String // SUCCESS | PARTIAL | FAILED | RUNNING
+  itemsFetched Int       @default(0)
+  itemsCreated Int       @default(0)
+  itemsUpdated Int       @default(0)
+  errors       String? // JSON [{step, message}]
+  startedAt    DateTime
+  finishedAt   DateTime?
+  durationMs   Int?
+
+  @@index([module, startedAt])
+}
