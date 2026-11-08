@@ -2,13 +2,16 @@
 
 /**
  * MODULE MMA — Vue Événements : liste des événements à venir / passés.
+ * Données : scoreboards ESPN appelés directement par le navigateur
+ * (UFC, PFL), mis en cache 10 minutes.
  */
 import { useMemo, useState } from 'react'
 import { CalendarDays, MapPin, ChevronRight, Swords, History } from 'lucide-react'
-import { useApi, formatDateFr, formatTimeFr, daysUntil } from '@/components/voltrix/api'
+import { useAsyncData, formatDateFr, formatTimeFr, daysUntil } from '@/components/voltrix/api'
+import { loadEvents } from '@/lib/mma/loaders'
+import type { ScoreboardEventDTO } from '@/lib/espn'
 import {
   MmaEventsResponse,
-  MmaEventListItem,
   ORG_STYLES,
   STATUS_CLASSES,
   STATUS_LABELS,
@@ -16,18 +19,16 @@ import {
 import { cn } from '@/lib/utils'
 
 interface MmaEventsListProps {
-  onOpenEvent: (eventId: string) => void
+  onOpenEvent: (event: ScoreboardEventDTO) => void
 }
 
 export function MmaEventsList({ onOpenEvent }: MmaEventsListProps) {
   const [window, setWindow] = useState<'upcoming' | 'past'>('upcoming')
-  const { data, loading, error } = useApi<MmaEventsResponse>(
-    `/api/mma/events?window=${window}`
-  )
+  const { data, loading, error, reload } = useAsyncData<MmaEventsResponse>(() => loadEvents(window), { key: window })
 
   const events = data?.events ?? []
   const grouped = useMemo(() => {
-    const byOrg = new Map<string, MmaEventListItem[]>()
+    const byOrg = new Map<string, typeof events>()
     for (const e of events) {
       const list = byOrg.get(e.organization) ?? []
       list.push(e)
@@ -45,7 +46,7 @@ export function MmaEventsList({ onOpenEvent }: MmaEventsListProps) {
             Événements MMA
           </h2>
           <p className="text-sm text-zinc-500 mt-1">
-            Cartes officielles synchronisées depuis ESPN · UFC, PFL, Bellator
+            Cartes officielles ESPN appelées en direct par votre navigateur · UFC, PFL
           </p>
         </div>
         <div className="flex glass-soft rounded-xl p-1 self-start" role="tablist" aria-label="Fenêtre temporelle">
@@ -55,9 +56,16 @@ export function MmaEventsList({ onOpenEvent }: MmaEventsListProps) {
       </div>
 
       {error && (
-        <p className="glass rounded-xl p-4 text-sm text-red-200" role="alert">
+        <div className="glass rounded-xl p-4 text-sm text-red-200" role="alert">
           Impossible de charger les événements : {error}
-        </p>
+          <button
+            type="button"
+            onClick={() => void reload()}
+            className="ml-3 text-violet-300 hover:text-violet-200 underline underline-offset-2"
+          >
+            Réessayer
+          </button>
+        </div>
       )}
 
       {loading && events.length === 0 && !error && <EventsSkeleton />}
@@ -75,7 +83,10 @@ export function MmaEventsList({ onOpenEvent }: MmaEventsListProps) {
           </h3>
           <div className="grid gap-3">
             {list.map((e) => (
-              <EventCard key={e.id} event={e} onOpen={() => onOpenEvent(e.id)} />
+              <EventCard key={e.id} event={e} onOpen={() => {
+                const dto = data?.dtos.find((d) => d.externalId === e.id)
+                if (dto) onOpenEvent(dto)
+              }} />
             ))}
           </div>
         </div>
@@ -83,9 +94,8 @@ export function MmaEventsList({ onOpenEvent }: MmaEventsListProps) {
 
       {data?.lastSyncAt && (
         <p className="text-[11px] text-zinc-600 px-1">
-          Dernière synchronisation : {formatDateFr(data.lastSyncAt, { weekday: undefined })} à{' '}
-          {formatTimeFr(data.lastSyncAt)} UTC
-          {data.syncStatus ? ` · ${data.syncStatus}` : ''}
+          Données ESPN chargées à {formatTimeFr(data.lastSyncAt)} UTC · cache navigateur 10 min ·
+          application 100 % frontend, aucun serveur
         </p>
       )}
     </section>
@@ -109,7 +119,7 @@ function WindowButton({ active, onClick, label }: { active: boolean; onClick: ()
   )
 }
 
-function EventCard({ event, onOpen }: { event: MmaEventListItem; onOpen: () => void }) {
+function EventCard({ event, onOpen }: { event: MmaEventsResponse['events'][number]; onOpen: () => void }) {
   const org = ORG_STYLES[event.organization] ?? {
     label: event.organization,
     badge: 'text-zinc-200 bg-white/10 border-white/20',

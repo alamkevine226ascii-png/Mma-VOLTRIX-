@@ -3,16 +3,20 @@
 /**
  * MODULE MMA — Vue racine : navigation interne
  * Événements -> Événement -> Combat.
+ * Navigation par contexte React (aucune requête serveur, aucun /api) :
+ * l'événement sélectionné est transmis directement à la vue détail.
  */
 import { useState } from 'react'
+import type { ScoreboardEventDTO } from '@/lib/espn'
+import type { FightContext } from '@/lib/mma/loaders'
 import { MmaEventsList } from '@/components/mma/MmaEventsList'
 import { MmaEventDetailView } from '@/components/mma/MmaEventDetailView'
 import { MmaFightDetailView } from '@/components/mma/MmaFightDetailView'
 
 type MmaView =
   | { name: 'events' }
-  | { name: 'event'; eventId: string }
-  | { name: 'fight'; fightId: string; eventId: string }
+  | { name: 'event'; event: ScoreboardEventDTO }
+  | { name: 'fight'; ctx: FightContext; event: ScoreboardEventDTO }
 
 export function MmaView() {
   const [view, setView] = useState<MmaView>({ name: 'events' })
@@ -20,9 +24,9 @@ export function MmaView() {
   if (view.name === 'event') {
     return (
       <MmaEventDetailView
-        eventId={view.eventId}
+        event={view.event}
         onBack={() => setView({ name: 'events' })}
-        onOpenFight={(fightId) => setView({ name: 'fight', fightId, eventId: view.eventId })}
+        onOpenFight={(ctx) => setView({ name: 'fight', ctx, event: view.event })}
       />
     )
   }
@@ -30,11 +34,11 @@ export function MmaView() {
   if (view.name === 'fight') {
     return (
       <MmaFightDetailView
-        fightId={view.fightId}
-        onBack={() => setView({ name: 'event', eventId: view.eventId })}
+        ctx={view.ctx}
+        onBack={() => setView({ name: 'event', event: view.event })}
       />
     )
   }
 
-  return <MmaEventsList onOpenEvent={(eventId) => setView({ name: 'event', eventId })} />
+  return <MmaEventsList onOpenEvent={(event) => setView({ name: 'event', event })} />
 }

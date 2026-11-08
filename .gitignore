@@ -1,4 +1,4 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+# See https://help.github.com/articles/ignoring-files/ for more information.
 
 # dependencies
 node_modules
@@ -30,12 +30,11 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# env files
 .env*
 
 # vercel
 .vercel
-
 
 # typescript
 *.tsbuildinfo
@@ -48,7 +47,18 @@ dev.log
 dev.out.log
 test
 prompt
-
 server.log
-# Skills directory
+
+# Environnement de développement sandbox (non partie de l'application)
 /skills/
+/.zscripts/
+/examples/
+/mini-services/
+/tests/
+/tool-results/
+/scripts/
+/download/
+/Caddyfile
+/db/
+/prisma/
+package-lock.json

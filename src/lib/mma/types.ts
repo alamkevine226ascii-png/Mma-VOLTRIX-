@@ -1,10 +1,10 @@
 /**
- * MODULE MMA — Types du domaine, mappages de statuts et utilitaires.
- * Chaque règle de correspondance fournisseur -> domaine est documentée ici
- * et testée dans src/modules/mma/__tests__/types.test.ts
+ * VOLTRIX — Types du domaine MMA, mappages de statuts et utilitaires purs.
+ * Portage 100 % frontend de l'ancienne couche serveur : mêmes règles,
+ * mêmes formules, aucune dépendance serveur.
  */
 
-/** Statuts de combat/événement exigés par VOLTRIX (+ EN_COURS pour le direct). */
+/** Statuts de combat/événement du domaine VOLTRIX (+ EN_COURS pour le direct). */
 export const FIGHT_STATUSES = [
   'PROGRAMME',
   'CONFIRME',
@@ -24,15 +24,6 @@ export const FIGHT_STATUS_LABELS: Record<FightStatus, string> = {
   EN_COURS: 'En cours',
 }
 
-export const FIGHT_STATUS_COLORS: Record<FightStatus, string> = {
-  PROGRAMME: 'text-amber-300 bg-amber-400/10 border-amber-400/30',
-  CONFIRME: 'text-emerald-300 bg-emerald-400/10 border-emerald-400/30',
-  REPORTE: 'text-orange-300 bg-orange-400/10 border-orange-400/30',
-  ANNULE: 'text-red-300 bg-red-400/10 border-red-400/30',
-  TERMINE: 'text-zinc-300 bg-zinc-400/10 border-zinc-400/30',
-  EN_COURS: 'text-rose-300 bg-rose-400/10 border-rose-400/30',
-}
-
 export type ResultMethod = 'KO_TKO' | 'SOUMISSION' | 'DECISION'
 
 export const RESULT_METHOD_LABELS: Record<ResultMethod, string> = {
@@ -41,24 +32,14 @@ export const RESULT_METHOD_LABELS: Record<ResultMethod, string> = {
   DECISION: 'Décision',
 }
 
-/** Garde traduite. */
-export const STANCE_LABELS: Record<string, string> = {
-  Orthodox: 'Orthodoxe',
-  Southpaw: 'Gaucher',
-  Switch: 'Alterné',
-  'Open Stance': 'Ouverte',
+/** Codes de ligue -> organisation. */
+export const LEAGUE_TO_ORG: Record<string, string> = {
+  ufc: 'UFC',
+  pfl: 'PFL',
+  bellator: 'BELLATOR',
 }
 
-export const ORGANIZATIONS = ['UFC', 'PFL', 'BELLATOR'] as const
-export type Organization = (typeof ORGANIZATIONS)[number]
-
-export const ORG_LABELS: Record<Organization, string> = {
-  UFC: 'UFC',
-  PFL: 'PFL',
-  BELLATOR: 'Bellator',
-}
-
-/** Catégories de poids connues (affichage FR + ordre). */
+/** Catégories de poids connues (affichage FR). */
 export const WEIGHT_CLASS_FR: Record<string, string> = {
   'Strawweight': 'Paille',
   'Flyweight': 'Mouche',
@@ -81,21 +62,20 @@ export function weightClassFr(name?: string | null): string | undefined {
   return WEIGHT_CLASS_FR[name] ?? name
 }
 
-/**
- * Correspondance statut ESPN -> statut VOLTRIX.
- * Règles (validées sur données réelles du 2026-11-08) :
- *  - state "pre"  : STATUS_POSTPONED -> REPORTE ; contient CANCEL -> ANNULE ; sinon PROGRAMME
- *    (un combat PROGRAMME passe à CONFIRME quand ses données sont complètes, règle VOLTRIX)
- *  - state "in"   : EN_COURS
- *  - state "post" : completed -> TERMINE (contient CANCEL -> ANNULE)
- *  - état inconnu : repli sur la date (futur -> PROGRAMME, passé -> TERMINE), rawStatus conservé
- */
 export interface RawStatusInfo {
   state?: string | null
   name?: string | null
   completed?: boolean | null
 }
 
+/**
+ * Correspondance statut ESPN -> statut VOLTRIX.
+ * Règles (validées sur données réelles) :
+ *  - state "pre"  : STATUS_POSTPONED -> REPORTE ; contient CANCEL -> ANNULE ; sinon PROGRAMME
+ *  - state "in"   : EN_COURS
+ *  - state "post" : completed -> TERMINE (contient CANCEL -> ANNULE)
+ *  - état inconnu : repli sur la date (futur -> PROGRAMME, passé -> TERMINE)
+ */
 export function mapEspnStatus(raw: RawStatusInfo | null | undefined, date: Date): FightStatus {
   const state = raw?.state ?? ''
   const name = (raw?.name ?? '').toUpperCase()
@@ -109,11 +89,10 @@ export function mapEspnStatus(raw: RawStatusInfo | null | undefined, date: Date)
     if (name.includes('POSTPONED')) return 'REPORTE'
     return 'TERMINE'
   }
-  // État non reconnu : repli honnête fondé sur la date
   return date.getTime() > Date.now() ? 'PROGRAMME' : 'TERMINE'
 }
 
-/** Méthode de victoire depuis le champ status.result.name de l'API (ex: "kotko", "decision---unanimous"). */
+/** Méthode de victoire depuis le champ status.result.name (ex: "kotko", "decision---unanimous"). */
 export function mapResultMethod(resultName?: string | null): ResultMethod | null {
   if (!resultName) return null
   const n = resultName.toLowerCase()
@@ -146,9 +125,9 @@ export function resultMethodDetail(result?: { name?: string | null; description?
 
 /**
  * Durée d'un combat terminé, en secondes.
- * Formule VALIDÉE sur données réelles (4 combats vérifiés le 2026-11-08) :
- *  - horloge < 300 s (arrêt avant la fin du round)  : (period - 1) * 300 + (300 - clock)
- *  - horloge = 300 s (combat mené à son terme)       : period * 300
+ * Formule VALIDÉE sur données réelles (4 combats vérifiés) :
+ *  - horloge < 300 s : (period - 1) * 300 + (300 - clock)
+ *  - horloge = 300 s : period * 300
  * Retourne null si les données sont insuffisantes.
  */
 export function fightDurationSeconds(status?: { clock?: number | null; period?: number | null } | null): number | null {
@@ -169,10 +148,7 @@ export function parseRecord(summary?: string | null): { wins: number; losses: nu
   return { wins: Number(m[1]), losses: Number(m[2]), draws: Number(m[3]) }
 }
 
-/**
- * Normalisation de nom pour le dédoublonnage inter-sources :
- * minuscules, sans accents, sans ponctuation, espaces simples.
- */
+/** Normalisation de nom (dédoublonnage) : minuscules, sans accents ni ponctuation. */
 export function normalizeName(fullName: string): string {
   return fullName
     .normalize('NFD')
@@ -189,14 +165,16 @@ export function inchesToCm(inches: number | null | undefined): number | null {
   return Math.round(Number(inches) * 2.54 * 10) / 10
 }
 
-/** Résultat récent -> forme. Renvoie la suite la plus récente d'abord, ex: "W,W,L,W,W". */
-export function lastResultsFromHistory(history: { result: string; eventDate: Date }[], count = 5): string | null {
-  const sorted = [...history].sort((a, b) => b.eventDate.getTime() - a.eventDate.getTime())
-  return sorted
-    .filter((h) => ['W', 'L', 'D', 'NC'].includes(h.result))
-    .slice(0, count)
-    .map((h) => h.result)
-    .join(',') || null
+/** Résultats récents -> forme, plus récents d'abord, ex: "W,W,L,W,W". */
+export function lastResultsFromHistory(history: { result: string; eventDate: string }[], count = 5): string | null {
+  const sorted = [...history].sort((a, b) => new Date(b.eventDate).getTime() - new Date(a.eventDate).getTime())
+  return (
+    sorted
+      .filter((h) => ['W', 'L', 'D', 'NC'].includes(h.result))
+      .slice(0, count)
+      .map((h) => h.result)
+      .join(',') || null
+  )
 }
 
 /** Score de forme : W=1, D=0.5, NC exclu, L=0 — sur les n derniers résultats. */
@@ -206,4 +184,10 @@ export function formScore(lastResults: string | null | null, count = 5): number 
   if (results.length === 0) return null
   const total = results.reduce((acc, r) => acc + (r === 'W' ? 1 : r === 'D' ? 0.5 : 0), 0)
   return total / results.length
+}
+
+/** Détection des combattants placeholders (adversaire à annoncer). */
+export function isPlaceholderFighter(name: string): boolean {
+  const n = normalizeName(name)
+  return n === 'tba' || n === 'tbd' || n.endsWith(' tba') || n.endsWith(' tbd') || n === ''
 }

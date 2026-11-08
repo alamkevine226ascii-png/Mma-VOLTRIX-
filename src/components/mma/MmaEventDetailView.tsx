@@ -2,10 +2,16 @@
 
 /**
  * MODULE MMA — Vue Événement : carte complète des combats, groupée par segment,
- * avec pronostic express (palmarès & forme) sur les combats à venir.
+ * avec pronostic express sur les combats à venir.
+ * Données : détails de compétition ESPN appelés directement par le navigateur ;
+ * formes récentes chargées en arrière-plan puis fusionnées.
  */
+import { useEffect, useState } from 'react'
 import { ArrowLeft, CalendarDays, MapPin, Sparkles, Trophy } from 'lucide-react'
-import { useApi, formatDateTimeFr } from '@/components/voltrix/api'
+import { useAsyncData, formatDateTimeFr } from '@/components/voltrix/api'
+import { enhanceEventWithForms, loadEventDetail } from '@/lib/mma/loaders'
+import type { FightContext } from '@/lib/mma/loaders'
+import type { ScoreboardEventDTO } from '@/lib/espn'
 import {
   MmaEventDetail,
   ORG_STYLES,
@@ -16,17 +22,37 @@ import {
 import { cn } from '@/lib/utils'
 
 interface MmaEventDetailProps {
-  eventId: string
+  event: ScoreboardEventDTO
   onBack: () => void
-  onOpenFight: (fightId: string) => void
+  onOpenFight: (ctx: FightContext) => void
 }
 
 const SEGMENT_ORDER = ['Main Card', 'Prelims', 'Early Prelims']
 
-export function MmaEventDetailView({ eventId, onBack, onOpenFight }: MmaEventDetailProps) {
-  const { data, loading, error } = useApi<{ event: MmaEventDetail }>(`/api/mma/events/${eventId}`)
+export function MmaEventDetailView({ event, onBack, onOpenFight }: MmaEventDetailProps) {
+  const { data, loading, error, reload } = useAsyncData<MmaEventDetail>(() => loadEventDetail(event), { key: event.externalId })
+  // Carte enrichie, étiquetée par événement : celle d'un événement précédent
+  // est ignorée lors d'une navigation rapide.
+  const [enhanced, setEnhanced] = useState<{ key: string; detail: MmaEventDetail } | null>(null)
 
-  if (loading && !data) {
+  // Arrière-plan : formes récentes des combattants (une requête par combattant,
+  // en cache), puis pronostics express recalculés sur « palmarès + forme ».
+  useEffect(() => {
+    if (!data) return
+    let cancelled = false
+    void enhanceEventWithForms(data)
+      .then((e) => {
+        if (!cancelled) setEnhanced({ key: event.externalId, detail: e })
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [data, event.externalId])
+
+  const detail = enhanced?.key === event.externalId ? enhanced.detail : data
+
+  if (loading && !detail) {
     return (
       <div className="space-y-4" aria-busy="true">
         <div className="glass-soft rounded-2xl h-32 voltrix-pulse" />
@@ -37,18 +63,25 @@ export function MmaEventDetailView({ eventId, onBack, onOpenFight }: MmaEventDet
     )
   }
 
-  if (error || !data?.event) {
+  if (error || !detail) {
     return (
       <div className="space-y-4">
         <BackButton onBack={onBack} />
         <p className="glass rounded-xl p-4 text-sm text-red-200" role="alert">
-          {error ?? 'Événement introuvable'}
+          {error ?? 'Événement introuvable'}{' '}
+          <button
+            type="button"
+            onClick={() => void reload()}
+            className="ml-2 text-violet-300 hover:text-violet-200 underline underline-offset-2"
+          >
+            Réessayer
+          </button>
         </p>
       </div>
     )
   }
 
-  const e = data.event
+  const e = detail
   const org = ORG_STYLES[e.organization] ?? {
     label: e.organization,
     badge: 'text-zinc-200 bg-white/10 border-white/20',
@@ -56,6 +89,40 @@ export function MmaEventDetailView({ eventId, onBack, onOpenFight }: MmaEventDet
 
   const segments = SEGMENT_ORDER.filter((s) => e.fights.some((f) => f.cardSegment === s))
   const others = e.fights.filter((f) => !SEGMENT_ORDER.includes(f.cardSegment ?? ''))
+
+  const openFight = (fight: MmaEventDetail['fights'][number]) => {
+    const fighters = fight.fighters.map((x) => ({
+      espnAthleteId: x.espnAthleteId,
+      fullName: x.fullName,
+      recordAtFight: x.recordAtFight,
+      isWinner: x.isWinner,
+    }))
+    if (fighters.length !== 2) return
+    onOpenFight({
+      espnEventId: e.espnEventId,
+      espnCompetitionId: fight.espnCompetitionId,
+      league: e.league,
+      event: {
+        id: e.id,
+        name: e.name,
+        organization: e.organization,
+        date: e.date,
+        venue: e.venue,
+        city: e.city,
+        country: e.country,
+      },
+      fight: {
+        weightClass: fight.weightClass,
+        scheduledRounds: fight.scheduledRounds,
+        cardSegment: fight.cardSegment,
+        status: fight.status,
+        resultMethod: fight.resultMethod,
+        resultDetail: fight.resultDetail,
+        durationSeconds: fight.durationSeconds,
+      },
+      fighters,
+    })
+  }
 
   return (
     <section aria-label={`Carte de ${e.name}`} className="space-y-5">
@@ -101,15 +168,16 @@ export function MmaEventDetailView({ eventId, onBack, onOpenFight }: MmaEventDet
           key={segment}
           title={segment === 'Main Card' ? 'Carte principale' : segment === 'Prelims' ? 'Prelims' : 'Prelims précoces'}
           fights={e.fights.filter((f) => f.cardSegment === segment)}
-          onOpenFight={onOpenFight}
+          onOpenFight={openFight}
         />
       ))}
       {others.length > 0 && (
-        <FightSegment title="Autres combats" fights={others} onOpenFight={onOpenFight} />
+        <FightSegment title="Autres combats" fights={others} onOpenFight={openFight} />
       )}
 
       <p className="text-[11px] text-zinc-600 px-1">
-        Carte synchronisée depuis ESPN · {e.fights.length} combats enregistrés
+        Carte chargée depuis ESPN · {e.fights.length} combats enregistrés · détails et formes
+        complétés progressivement dans votre navigateur
       </p>
     </section>
   )
@@ -122,7 +190,7 @@ function FightSegment({
 }: {
   title: string
   fights: MmaEventDetail['fights']
-  onOpenFight: (id: string) => void
+  onOpenFight: (id: MmaEventDetail['fights'][number]) => void
 }) {
   if (fights.length === 0) return null
   return (
@@ -130,7 +198,7 @@ function FightSegment({
       <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 px-1">{title}</h3>
       <div className="space-y-2.5">
         {fights.map((f) => (
-          <FightRow key={f.id} fight={f} onOpen={() => onOpenFight(f.id)} />
+          <FightRow key={f.id} fight={f} onOpen={() => onOpenFight(f)} />
         ))}
       </div>
     </div>

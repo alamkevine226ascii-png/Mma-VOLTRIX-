@@ -1,27 +1,38 @@
 'use client'
 
 /**
- * VOLTRIX — Utilitaires d'appel API côté client.
- * Petit hook de récupération avec état de chargement/erreur et rechargement.
+ * VOLTRIX — Utilitaires côté client.
+ * Hook générique de chargement asynchrone (données ESPN appelées directement
+ * par le navigateur) + formatage de dates en français.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-export function useApi<T>(url: string | null, opts: { pollMs?: number } = {}) {
+/**
+ * Charge une donnée via une fonction asynchrone (loader), avec états de
+ * chargement et d'erreur, et possibilité de rechargement manuel.
+ *
+ * `opts.key` : quand cette clé change (ex. fenêtre temporelle, identifiant
+ * de combat), le loader est relancé et les données précédentes sont effacées.
+ * Sans clé, le loader n'est exécuté qu'au montage et via reload().
+ */
+export function useAsyncData<T>(
+  loader: (() => Promise<T>) | null,
+  opts: { pollMs?: number; key?: string } = {}
+) {
   const [data, setData] = useState<T | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const mounted = useRef(true)
+  const loaderRef = useRef(loader)
+  loaderRef.current = loader
+  const lastKeyRef = useRef<string | undefined>(undefined)
 
   const load = useCallback(async () => {
-    if (!url) return
+    const fn = loaderRef.current
+    if (!fn) return
     setLoading((prev) => (data === null && prev ? prev : true))
     try {
-      const res = await fetch(url, { cache: 'no-store' })
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string }
-        throw new Error(body.error ?? `Erreur ${res.status}`)
-      }
-      const json = (await res.json()) as T
+      const json = await fn()
       if (mounted.current) {
         setData(json)
         setError(null)
@@ -33,23 +44,26 @@ export function useApi<T>(url: string | null, opts: { pollMs?: number } = {}) {
     } finally {
       if (mounted.current) setLoading(false)
     }
-  }, [url])
+  }, [data === null])
 
   useEffect(() => {
     mounted.current = true
+    if (opts.key != null && lastKeyRef.current !== opts.key) {
+      lastKeyRef.current = opts.key
+      setData(null)
+      setError(null)
+    }
     void load()
     return () => {
       mounted.current = false
     }
-  }, [load])
+  }, [load, opts.key])
 
   useEffect(() => {
-    if (!opts.pollMs || !url) return
-    const t = setInterval(() => {
-      void load()
-    }, opts.pollMs)
+    if (!opts.pollMs) return
+    const t = setInterval(() => void load(), opts.pollMs)
     return () => clearInterval(t)
-  }, [load, opts.pollMs, url])
+  }, [load, opts.pollMs])
 
   return { data, loading, error, reload: load }
 }

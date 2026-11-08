@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "VOLTRIX — MMA · Statistiques & Pronostics",
   description:
-    "VOLTRIX : événements, combats, combattants et pronostics MMA fondés sur des statistiques ESPN sourcées et datées.",
+    "VOLTRIX : application 100 % frontend. Événements, combats, combattants et pronostics MMA fondés sur les données publiques ESPN, appelées directement par votre navigateur.",
   icons: {
     icon: "/favicon.svg",
   },

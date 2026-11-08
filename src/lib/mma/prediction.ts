@@ -1,35 +1,27 @@
 /**
- * MODULE MMA — Moteur de pronostics.
+ * VOLTRIX — Moteur de pronostics (portage 100 % frontend, fonctions pures).
  *
- * Positionnement VOLTRIX : un pronostic FIABLE et CLAIR, c'est-à-dire :
- *  1. Fondé uniquement sur des données réellement observées (ESPN + calculs
- *     étiquetés) — jamais sur des valeurs inventées ou extrapolées.
- *  2. Explicite : chaque dimension utilisée est listée avec son poids et son
- *     indice relatif, pour que le lecteur puisse vérifier le raisonnement.
- *  3. Honnête : probabilités bornées (25–75 %) car le MMA produit beaucoup
- *     d'incertitudes ; un combat trop serré est signalé « indécis ».
- *  4. Refusé si les données sont insuffisantes (< 3 dimensions comparables) :
- *     « Pronostic non disponible » plutôt qu'un avis bâti sur du vide.
- *  5. Informatif : VOLTRIX n'édite aucune cote et ne donne aucun conseil
- *     de paris.
+ * Un pronostic FIABLE et CLAIR :
+ *  1. fondé uniquement sur des données réellement observées (ESPN + calculs
+ *     étiquetés) — jamais de valeurs inventées ou extrapolées ;
+ *  2. explicite : chaque dimension utilisée est listée avec son poids ;
+ *  3. honnête : probabilités bornées (25-75 %) ; combat trop serré -> indécis ;
+ *  4. refusé si les données sont insuffisantes (< 3 dimensions comparables) ;
+ *  5. informatif : aucune cote, aucun conseil de paris.
  *
- * Modèle (voltrix-mma-v1) :
- *  - chaque dimension comparative produit un indice relatif 0-100 pour chaque
- *    combattant (part de la somme des deux valeurs, cf. analysis.ts) ;
- *  - les dimensions disponibles sont agrégées avec des poids documentés ;
- *  - l'avantage normalisé est transformé en probabilité par une fonction
- *    logistique, puis borné.
+ * Modèle voltrix-mma-v1 : agrégation pondérée d'indices relatifs 0-100 par
+ * dimension, transformation logistique, bornage.
  */
-import type { DimensionScore, FighterView } from '@/modules/mma/services/analysis'
-import { formScore, parseRecord } from '@/modules/mma/types'
+import type { DimensionScore, FighterView } from './analysis'
+import { formScore, parseRecord } from './types'
 
 export const MODEL_VERSION = 'voltrix-mma-v1'
 
-/** Bornes de probabilité : au-delà, le modèle mentrait sur sa précision. */
+/** Bornes de probabilité : au-delà, le modèle mentirait sur sa précision. */
 export const P_MIN = 25
 export const P_MAX = 75
 
-/** Pente de la logistique : un avantage normalisé de 0,5 ≈ 78 % avant bornage. */
+/** Pente de la logistique. */
 const K_LOGISTIC = 2.6
 
 /** Dimensions minimales pour émettre un pronostic. */
@@ -41,8 +33,8 @@ const CORE_DIMENSIONS = ['forme', 'volume', 'precision', 'absorption', 'lutte', 
 /**
  * Poids des dimensions — publics et affichés dans l'interface.
  * Justification : les échanges debout décident la majorité des combats
- * (volume + précision + absorption), la forme récente est le meilleur
- * signal simple disponible, la lutte conditionne le choix du terrain.
+ * (volume + précision + absorption), la forme récente est le meilleur signal
+ * simple disponible, la lutte conditionne le choix du terrain.
  */
 export const DIMENSION_WEIGHTS: Record<string, number> = {
   forme: 1.5,
@@ -59,7 +51,7 @@ export const DIMENSION_WEIGHTS: Record<string, number> = {
 }
 
 // ---------------------------------------------------------------------------
-// Types de sortie (sérialisables pour l'API)
+// Types de sortie
 // ---------------------------------------------------------------------------
 
 export interface PredictionFactor {
@@ -68,11 +60,11 @@ export interface PredictionFactor {
   weight: number
   scoreA: number
   scoreB: number
-  edge: number // |score - 50| du côté favori, signé pour A
+  edge: number
 }
 
 export interface PredictionConfidence {
-  score: number // 0-100
+  score: number
   label: 'Bonne' | 'Moyenne' | 'Limitée'
   dimensionsUsed: number
   dimensionsTotal: number
@@ -81,7 +73,7 @@ export interface PredictionConfidence {
 
 export interface PredictionMethod {
   label: 'KO/TKO' | 'Soumission' | 'Décision'
-  share: number | null // % des victoires du favori obtenues par cette méthode
+  share: number | null
   detail: string
 }
 
@@ -192,7 +184,6 @@ export function computePrediction(
           ? 'avantage marqué'
           : 'avantage net'
 
-  // Fiabilité : couverture des dimensions, surtout celles du cœur du modèle
   const coreUsed = CORE_DIMENSIONS.filter((k) => usable.some((d) => d.key === k)).length
   const coverage = usable.length / dimensions.length
   const coreCoverage = coreUsed / CORE_DIMENSIONS.length
@@ -205,10 +196,8 @@ export function computePrediction(
     missing: dimensions.filter((d) => !d.available).map((d) => d.label),
   }
 
-  // Méthode de victoire la plus probable chez le favori
   const method = favView ? predictMethod(favView) : null
 
-  // Facteurs clés (top 3 pour le favori) et points de vigilance (top 2 pour l'autre)
   const forFavorite = favorite ? usable.filter((d) => d.advantage === favorite) : []
   const forOther = favorite ? usable.filter((d) => d.advantage !== favorite && d.advantage !== null && d.advantage !== '=') : []
   const byStrength = (list: DimensionScore[]) =>
@@ -260,7 +249,6 @@ function predictMethod(f: FighterView): PredictionMethod {
   const wins = f.record.wins
   const rates: { label: PredictionMethod['label']; rate: number | null }[] = []
 
-  // Taux issus du palmarès (victoires par méthode)
   if (wins != null && wins > 0) {
     const ko = (f.record.winsByKo ?? 0) / wins
     const sub = (f.record.winsBySub ?? 0) / wins
@@ -269,7 +257,6 @@ function predictMethod(f: FighterView): PredictionMethod {
     rates.push({ label: 'Décision', rate: Math.max(0, 1 - ko - sub) })
   }
 
-  // Taux issus des statistiques de carrière ESPN (le cas échéant, on moyenne)
   const s = f.stats
   if (s) {
     const career: { label: PredictionMethod['label']; rate: number | null }[] = [
@@ -309,7 +296,7 @@ function pct2rate(p: number | null): number | null {
 }
 
 // ---------------------------------------------------------------------------
-// Pronostic express (lignes de carte d'événement) — palmarès & forme uniquement
+// Pronostic express (lignes de carte d'événement)
 // ---------------------------------------------------------------------------
 
 export interface ExpressFighterInput {
@@ -349,7 +336,7 @@ export function computeExpressPrediction(x: ExpressFighterInput, y: ExpressFight
     return { available: false, favoriteName: null, probability: null, level: 'indécis', basis: 'données insuffisantes' }
   }
 
-  const diff = sx.score - sy.score // ∈ [-1, 1]
+  const diff = sx.score - sy.score
   const rawP = 1 / (1 + Math.exp(-2.2 * diff))
   const p = Math.round(clamp(rawP * 100, 30, 70))
   const favoriteName = p === 50 ? null : p > 50 ? x.fullName : y.fullName
@@ -364,10 +351,6 @@ export function computeExpressPrediction(x: ExpressFighterInput, y: ExpressFight
     basis: [...new Set([...sx.parts, ...sy.parts])].join(' + ') || 'palmarès',
   }
 }
-
-// ---------------------------------------------------------------------------
-// Utilitaires
-// ---------------------------------------------------------------------------
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v))

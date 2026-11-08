@@ -38,8 +38,10 @@ import {
   Users,
   XCircle,
 } from 'lucide-react'
-import { useApi, formatDateFr } from '@/components/voltrix/api'
+import { useAsyncData, formatDateFr } from '@/components/voltrix/api'
 import { BackButton } from '@/components/mma/MmaEventDetailView'
+import { loadFightAnalysis } from '@/lib/mma/loaders'
+import type { FightContext } from '@/lib/mma/loaders'
 import {
   FighterView,
   FightAnalysis,
@@ -51,7 +53,7 @@ import {
 import { cn } from '@/lib/utils'
 
 interface MmaFightDetailProps {
-  fightId: string
+  ctx: FightContext
   onBack: () => void
 }
 
@@ -101,15 +103,16 @@ const CHART_TOOLTIP_STYLE = {
   fontSize: 12,
 } as const
 
-export function MmaFightDetailView({ fightId, onBack }: MmaFightDetailProps) {
+export function MmaFightDetailView({ ctx, onBack }: MmaFightDetailProps) {
   const [tab, setTab] = useState<DetailTab>('pronostic')
-  const { data, loading, error, reload } = useApi<FightAnalysis>(`/api/mma/fights/${fightId}`)
+  const { data, loading, error, reload } = useAsyncData<FightAnalysis>(() => loadFightAnalysis(ctx), { key: ctx.espnCompetitionId })
   const pending = data?.derivedPending === true
 
-  // Recharge tant que les indicateurs dérivés sont en cours de calcul.
+  // Recharge tant que les indicateurs dérivés sont en cours de calcul
+  // dans le navigateur (cache sessionStorage à la clé).
   useEffect(() => {
     if (!pending) return
-    const t = setInterval(() => void reload(), 8000)
+    const t = setInterval(() => void reload(), 6000)
     return () => clearInterval(t)
   }, [pending, reload])
 
