@@ -8,7 +8,7 @@ datasource db {
 }
 
 // ===========================================================================
-// MODULE MMA — indépendant du moteur football
+// MODULE MMA — événements, combats, combattants, statistiques, pronostics
 // ===========================================================================
 
 model MmaEvent {
@@ -174,35 +174,6 @@ model MmaDerivedStats {
 }
 
 // ===========================================================================
-// MODULE FOOTBALL — moteur isolé, ne pas modifier pour le MMA
-// ===========================================================================
-
-model FootballMatch {
-  id           String   @id @default(cuid())
-  externalId   String   @unique // ex: "espn:eng.1:401234567"
-  league       String // "eng.1"
-  leagueName   String
-  homeTeam     String
-  awayTeam     String
-  homeTeamAbbr String?
-  awayTeamAbbr String?
-  homeLogo     String?
-  awayLogo     String?
-  date         DateTime
-  status       String // PROGRAMME | EN_COURS | TERMINE
-  rawStatus    String?
-  homeScore    Int?
-  awayScore    Int?
-  venue        String?
-  lastSyncedAt DateTime
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
-  @@index([date])
-  @@index([league])
-}
-
-// ===========================================================================
 // NOYAU PARTAGÉ — cache, journaux de synchronisation
 // ===========================================================================
 
@@ -217,7 +188,7 @@ model ApiCache {
 
 model SyncLog {
   id           String    @id @default(cuid())
-  module       String // "mma" | "football"
+  module       String // "mma"
   job          String // "events" | "event-details" | "fighters" | "full"
   status       String // SUCCESS | PARTIAL | FAILED | RUNNING
   itemsFetched Int       @default(0)

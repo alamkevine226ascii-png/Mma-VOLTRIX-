@@ -1,15 +1,17 @@
 /**
  * MODULE MMA — Route : GET /api/mma/events/[id]
- * Détail d'un événement : carte complète des combats, groupée par segment.
+ * Détail d'un événement : carte complète des combats, groupée par segment,
+ * avec un pronostic express (palmarès & forme) par combat programmé.
  * Déclenche l'enrichissement des détails (catégorie, rounds) à la demande
  * si l'événement n'a pas encore été enrichi.
  *
- * Réponse : { event: { ..., fights: [...] } }
+ * Réponse : { event: { ..., fights: [... { expressPrediction }] } }
  */
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { enrichEvent } from '@/modules/mma/services/sync'
 import { weightClassFr } from '@/modules/mma/types'
+import { computeExpressPrediction } from '@/modules/mma/services/prediction'
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
@@ -37,19 +39,8 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
       if (d !== 0) return d
       return (a.matchNumber ?? 99) - (b.matchNumber ?? 99)
     })
-    .map((f) => ({
-      id: f.id,
-      weightClass: f.weightClass,
-      weightClassFr: weightClassFr(f.weightClass ?? undefined) ?? null,
-      scheduledRounds: f.scheduledRounds,
-      cardSegment: f.cardSegment,
-      matchNumber: f.matchNumber,
-      status: f.status,
-      resultMethod: f.resultMethod,
-      resultDetail: f.resultDetail,
-      durationSeconds: f.durationSeconds,
-      winnerExternalId: f.winnerExternalId,
-      fighters: f.fighters
+    .map((f) => {
+      const ordered = f.fighters
         .sort((x, y) => (x.corner ?? 9) - (y.corner ?? 9))
         .map((ff) => ({
           id: ff.fighter.id,
@@ -65,8 +56,29 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
           lastResults: ff.fighter.lastResults,
           isWinner: ff.isWinner,
           profileSynced: ff.fighter.profileSynced,
-        })),
-    }))
+        }))
+      // Pronostic express : uniquement pour les combats à venir ou en cours,
+      // jamais a posteriori sur un combat terminé.
+      const expressPrediction =
+        f.status === 'TERMINE' || ordered.length !== 2
+          ? null
+          : computeExpressPrediction(ordered[0], ordered[1])
+      return {
+        id: f.id,
+        weightClass: f.weightClass,
+        weightClassFr: weightClassFr(f.weightClass ?? undefined) ?? null,
+        scheduledRounds: f.scheduledRounds,
+        cardSegment: f.cardSegment,
+        matchNumber: f.matchNumber,
+        status: f.status,
+        resultMethod: f.resultMethod,
+        resultDetail: f.resultDetail,
+        durationSeconds: f.durationSeconds,
+        winnerExternalId: f.winnerExternalId,
+        expressPrediction,
+        fighters: ordered,
+      }
+    })
 
   return NextResponse.json({
     event: {

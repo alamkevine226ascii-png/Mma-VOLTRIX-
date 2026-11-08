@@ -116,14 +116,27 @@ export async function providerFetchJson<T>(
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    const res = await fetch(url, {
+    // Les 403/429 intermittents du CDN (throttling) méritent UNE relance polie
+    // après une pause : observé le 2026-11-08 sur les endpoints ESPN.
+    let res = await fetch(url, {
       signal: controller.signal,
       headers: {
         Accept: 'application/json',
-        'User-Agent': 'VOLTRIX/1.0 (module données sportives; usage personnel non commercial)',
+        'User-Agent': 'VOLTRIX/2.0 (usage personnel non commercial)',
       },
       cache: 'no-store',
     })
+    if (res.status === 403 || res.status === 429) {
+      await sleep(2500)
+      res = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': 'VOLTRIX/2.0 (usage personnel non commercial)',
+        },
+        cache: 'no-store',
+      })
+    }
     if (res.status === 404) return null
     if (!res.ok) {
       throw new ProviderHttpError(provider, url, res.status, `HTTP ${res.status}`)
@@ -162,6 +175,4 @@ export const CACHE_TTL = {
   athleteStats: 12 * 60 * 60 * 1000,
   /** Historique de combats. */
   athleteHistory: 24 * 60 * 60 * 1000,
-  /** Matches football. */
-  football: 10 * 60 * 1000,
 } as const

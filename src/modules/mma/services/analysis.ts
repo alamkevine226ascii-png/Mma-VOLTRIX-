@@ -8,12 +8,14 @@
  *     défenses, temps moyen) sont CALCULÉS à partir des statistiques par
  *     combat sur une fenêtre explicite (par défaut 10 combats), et étiquetés
  *     comme tels avec leur date de calcul.
- *  4. Aucune probabilité présentée comme certitude ; aucun indice de paris.
+ *  4. Le pronostic (prediction.ts) est un service distinct : il agrège les
+ *     dimensions observées en une probabilité bornée et documentée ; il
+ *     n'invente jamais de donnée et refuse de trancher sans base suffisante.
  *
  * Normalisation des avantages : pour un indicateur où "plus haut = mieux",
  * score A = A / (A + B) * 100. Pour "plus bas = mieux" (absorption), la
- * formule est inversée. Cette normalisation relative ne prédit rien : elle
- * quantifie l'écart observé.
+ * formule est inversée. Cette normalisation relative quantifie l'écart
+ * observé entre les deux combattants.
  */
 import { db } from '@/lib/db'
 import {
@@ -23,6 +25,7 @@ import {
 } from '@/modules/mma/providers/espn'
 import { fightDurationSeconds, formScore } from '@/modules/mma/types'
 import { enrichEvent, enrichFighter } from '@/modules/mma/services/sync'
+import { computePrediction, type PredictionView } from '@/modules/mma/services/prediction'
 
 export const DERIVED_WINDOW = 10
 
@@ -32,6 +35,7 @@ export const DERIVED_WINDOW = 10
 
 export interface FighterView {
   id: string
+  externalId: string
   fullName: string
   nickname: string | null
   imageUrl: string | null
@@ -129,6 +133,7 @@ export interface FightAnalysis {
   dimensions: DimensionScore[]
   radar: { dimension: string; A: number | null; B: number | null }[]
   commentary: CommentaryBlock[]
+  prediction: PredictionView
   limitations: string[]
   sources: { name: string; url: string | null; detail: string; syncedAt: string }[]
   derivedPending: boolean
@@ -288,6 +293,7 @@ export async function getFightAnalysis(fightId: string): Promise<FightAnalysis |
   const radar = dimensions
     .filter((d) => d.available && ['volume', 'precision', 'absorption', 'lutte', 'sol', 'forme'].includes(d.key))
     .map((d) => ({ dimension: d.label, A: d.scoreA, B: d.scoreB }))
+  const prediction = computePrediction(viewA, viewB, dimensions)
 
   const derivedPending =
     (fa.stats != null && fa.derived.length === 0) || (fb.stats != null && fb.derived.length === 0)
@@ -323,6 +329,7 @@ export async function getFightAnalysis(fightId: string): Promise<FightAnalysis |
     dimensions,
     radar,
     commentary: buildCommentary(viewA, viewB, dimensions, fresh.weightClass),
+    prediction,
     limitations: buildLimitations(viewA, viewB),
     sources: buildSources(viewA, viewB, fresh.event.name),
     derivedPending,
@@ -346,6 +353,8 @@ type FighterWithRelations = NonNullable<
   Awaited<ReturnType<typeof loadFighter>>
 >
 
+export type { FighterWithRelations }
+
 async function loadFighter(id: string) {
   return db.mmaFighter.findUnique({
     where: { id },
@@ -353,7 +362,7 @@ async function loadFighter(id: string) {
   })
 }
 
-function toFighterView(f: FighterWithRelations): FighterView {
+export function toFighterView(f: FighterWithRelations): FighterView {
   const derived = f.derived.find((d) => d.windowSize === DERIVED_WINDOW) ?? null
   const history = [...f.history].sort((a, b) => b.eventDate.getTime() - a.eventDate.getTime())
   const totalFights =
@@ -362,6 +371,7 @@ function toFighterView(f: FighterWithRelations): FighterView {
       : null
   return {
     id: f.id,
+    externalId: f.externalId,
     fullName: f.fullName,
     nickname: f.nickname,
     imageUrl: f.imageUrl,
@@ -505,7 +515,8 @@ function edge(a: number | null, b: number | null, lowerBetter = false): { scoreA
   return { scoreA: round2(scoreA), scoreB: round2(scoreB), advantage }
 }
 
-function buildDimensions(a: FighterView, b: FighterView): DimensionScore[] {
+/** Construit les dimensions comparatives entre deux vues combattants (exporté pour le backtest). */
+export function buildDimensions(a: FighterView, b: FighterView): DimensionScore[] {
   const dims: DimensionScore[] = []
   const add = (
     key: string,
@@ -641,8 +652,8 @@ function buildLimitations(a: FighterView, b: FighterView): string[] {
   if (b.derived && b.derived.fightsUsed < DERIVED_WINDOW) {
     lim.push(`${b.fullName} : indicateurs calculés sur ${b.derived.fightsUsed} combats seulement (fenêtre cible ${DERIVED_WINDOW}).`)
   }
-  lim.push('Les indices relatifs (0-100) comparent les deux combattants entre eux ; ils ne mesurent pas une probabilité de victoire.')
-  lim.push('Aucun système de cotes ni de recommandation de paris n\'est fourni, par conception.')
+  lim.push('Les indices relatifs par dimension (0-100) comparent les deux combattants entre eux ; la probabilité du pronostic agrège ces dimensions dans un modèle pondéré distinct.')
+  lim.push('Le pronostic est une estimation statistique bornée (25-75 %), pas une certitude ; aucune cote n\'est éditée.')
   return lim
 }
 

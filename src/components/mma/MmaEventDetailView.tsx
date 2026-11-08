@@ -1,9 +1,10 @@
 'use client'
 
 /**
- * MODULE MMA — Vue Événement : carte complète des combats, groupée par segment.
+ * MODULE MMA — Vue Événement : carte complète des combats, groupée par segment,
+ * avec pronostic express (palmarès & forme) sur les combats à venir.
  */
-import { ArrowLeft, CalendarDays, MapPin, Trophy } from 'lucide-react'
+import { ArrowLeft, CalendarDays, MapPin, Sparkles, Trophy } from 'lucide-react'
 import { useApi, formatDateTimeFr } from '@/components/voltrix/api'
 import {
   MmaEventDetail,
@@ -193,6 +194,25 @@ function FightRow({
           <Trophy className="h-3.5 w-3.5 text-amber-300/80" aria-hidden="true" />
           {fight.resultDetail}
           {fight.durationSeconds != null && ` · ${Math.floor(fight.durationSeconds / 60)}:${String(fight.durationSeconds % 60).padStart(2, '0')}`}
+        </p>
+      )}
+
+      {fight.expressPrediction?.available && fight.expressPrediction.favoriteName && (
+        <p className="mt-2 text-[11px] text-violet-200/90 inline-flex items-center gap-1.5 flex-wrap">
+          <Sparkles className="h-3.5 w-3.5 text-violet-300/90" aria-hidden="true" />
+          <span>
+            Pronostic express : <strong>{fight.expressPrediction.favoriteName}</strong>
+            {fight.expressPrediction.probability != null && ` (~${fight.expressPrediction.probability} %)`} ·{' '}
+            <span className="text-zinc-500">
+              {fight.expressPrediction.level} · {fight.expressPrediction.basis} — analyse complète dans le combat
+            </span>
+          </span>
+        </p>
+      )}
+      {fight.expressPrediction?.available && !fight.expressPrediction.favoriteName && (
+        <p className="mt-2 text-[11px] text-zinc-500 inline-flex items-center gap-1.5">
+          <Sparkles className="h-3.5 w-3.5 text-zinc-500" aria-hidden="true" />
+          Pronostic express : trop serré sur {fight.expressPrediction.basis} — analyse complète dans le combat
         </p>
       )}
     </button>

@@ -19,8 +19,12 @@ import {
 } from 'recharts'
 import {
   Activity,
+  AlertTriangle,
   BarChart3,
   CalendarDays,
+  CheckCircle2,
+  ChevronDown,
+  Crosshair,
   ExternalLink,
   Flag,
   Info,
@@ -28,9 +32,11 @@ import {
   Ruler,
   ScanEye,
   ShieldAlert,
+  Sparkles,
   Swords,
   Timer,
   Users,
+  XCircle,
 } from 'lucide-react'
 import { useApi, formatDateFr } from '@/components/voltrix/api'
 import { BackButton } from '@/components/mma/MmaEventDetailView'
@@ -49,9 +55,10 @@ interface MmaFightDetailProps {
   onBack: () => void
 }
 
-type DetailTab = 'comparaison' | 'historique' | 'styles' | 'sources'
+type DetailTab = 'pronostic' | 'comparaison' | 'historique' | 'styles' | 'sources'
 
 const TABS: { key: DetailTab; label: string; icon: React.ReactNode }[] = [
+  { key: 'pronostic', label: 'Pronostic', icon: <Sparkles className="h-4 w-4" aria-hidden="true" /> },
   { key: 'comparaison', label: 'Comparaison', icon: <BarChart3 className="h-4 w-4" aria-hidden="true" /> },
   { key: 'historique', label: 'Historique', icon: <CalendarDays className="h-4 w-4" aria-hidden="true" /> },
   { key: 'styles', label: 'Styles', icon: <Swords className="h-4 w-4" aria-hidden="true" /> },
@@ -95,7 +102,7 @@ const CHART_TOOLTIP_STYLE = {
 } as const
 
 export function MmaFightDetailView({ fightId, onBack }: MmaFightDetailProps) {
-  const [tab, setTab] = useState<DetailTab>('comparaison')
+  const [tab, setTab] = useState<DetailTab>('pronostic')
   const { data, loading, error, reload } = useApi<FightAnalysis>(`/api/mma/fights/${fightId}`)
   const pending = data?.derivedPending === true
 
@@ -225,11 +232,345 @@ export function MmaFightDetailView({ fightId, onBack }: MmaFightDetailProps) {
         ))}
       </div>
 
+      {tab === 'pronostic' && <PredictionTab data={data} />}
       {tab === 'comparaison' && <ComparisonTab data={data} />}
       {tab === 'historique' && <HistoryTab data={data} />}
       {tab === 'styles' && <StylesTab data={data} />}
       {tab === 'sources' && <SourcesTab data={data} />}
     </section>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Onglet Pronostic
+// ---------------------------------------------------------------------------
+
+const CONFIDENCE_STYLES: Record<string, string> = {
+  Bonne: 'text-emerald-200 bg-emerald-400/10 border-emerald-300/25',
+  Moyenne: 'text-amber-200 bg-amber-400/10 border-amber-300/25',
+  Limitée: 'text-orange-200 bg-orange-400/10 border-orange-300/25',
+}
+
+function PredictionTab({ data }: { data: FightAnalysis }) {
+  const p = data.prediction
+  const [methodologyOpen, setMethodologyOpen] = useState(false)
+  const a = data.fighters[0]
+  const b = data.fighters[1]
+
+  // Confrontation rétrospective pour un combat terminé
+  const retrospective =
+    data.fight.status === 'TERMINE' && p.available
+      ? {
+          fought: data.fight.winner != null,
+          correct: p.favoriteExternalId != null && p.favoriteExternalId === data.fight.winner,
+        }
+      : null
+
+  if (!p.available) {
+    return (
+      <div className="space-y-4">
+        <div className="glass rounded-2xl p-6 text-center" role="status">
+          <AlertTriangle className="h-8 w-8 text-amber-300 mx-auto mb-3" aria-hidden="true" />
+          <h3 className="font-bold text-zinc-100">Pronostic non disponible</h3>
+          <p className="text-sm text-zinc-400 mt-2 max-w-xl mx-auto">{p.unavailabilityReason}</p>
+          <p className="text-xs text-zinc-500 mt-3 max-w-xl mx-auto">
+            VOLTRIX ne pronostique jamais sans données observées suffisantes. Les fiches des combattants
+            peuvent encore être en cours de synchronisation — actualisez dans un instant.
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Encadré rétrospectif pour un combat terminé */}
+      {retrospective && (
+        <div
+          className={cn(
+            'glass rounded-2xl px-4 py-3 text-sm flex items-start gap-3',
+            retrospective.fought
+              ? retrospective.correct
+                ? 'text-emerald-200'
+                : 'text-red-200'
+              : 'text-zinc-300'
+          )}
+          role="status"
+        >
+          {retrospective.fought ? (
+            retrospective.correct ? (
+              <CheckCircle2 className="h-5 w-5 mt-0.5 shrink-0" aria-hidden="true" />
+            ) : (
+              <XCircle className="h-5 w-5 mt-0.5 shrink-0" aria-hidden="true" />
+            )
+          ) : (
+            <Info className="h-5 w-5 mt-0.5 shrink-0" aria-hidden="true" />
+          )}
+          <p>
+            {retrospective.fought ? (
+              <>
+                Combat terminé — <strong>vérification rétrospective</strong> : le modèle donnait{' '}
+                {p.favoriteName} favori à {Math.max(p.probabilityA ?? 0, p.probabilityB ?? 0)} %.{' '}
+                {retrospective.correct
+                  ? 'Le favori du modèle a bien gagné.'
+                  : `Le vainqueur réel (${data.fighters.find((f) => f.externalId === data.fight.winner)?.fullName ?? 'adversaire'}) a créé la surprise.`}
+              </>
+            ) : (
+              <>
+                Combat terminé — vainqueur non identifié dans les données synchronisées ; vérification
+                rétrospective impossible.
+              </>
+            )}
+          </p>
+        </div>
+      )}
+
+      {/* Carte principale du pronostic */}
+      <article className="glass rounded-2xl p-5 sm:p-6 relative overflow-hidden">
+        <div
+          className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-violet-300/40 to-transparent"
+          aria-hidden="true"
+        />
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-5">
+          <h3 className="font-bold text-zinc-100 inline-flex items-center gap-2">
+            <Sparkles className="h-4 w-4 text-violet-300" aria-hidden="true" />
+            Pronostic VOLTRIX
+          </h3>
+          <div className="flex items-center gap-2 flex-wrap">
+            {p.confidence && (
+              <span
+                className={cn(
+                  'text-[11px] px-2 py-0.5 rounded-md border',
+                  CONFIDENCE_STYLES[p.confidence.label] ?? 'text-zinc-300 bg-white/5 border-white/15'
+                )}
+                title={`Fiabilité des données : ${p.confidence.score}/100`}
+              >
+                Fiabilité {p.confidence.label.toLowerCase()} · {p.confidence.dimensionsUsed}/
+                {p.confidence.dimensionsTotal} dimensions
+              </span>
+            )}
+            <span className="text-[10px] text-zinc-500 font-mono">{p.model.version}</span>
+          </div>
+        </div>
+
+        {p.favorite == null ? (
+          <p className="text-sm text-zinc-300 text-center py-6">
+            Rencontre <strong>statistiquement trop serrée</strong> pour désigner un favori
+            ({p.probabilityA} % – {p.probabilityB} %). Aucun avis ne serait honnête sur cet écart.
+          </p>
+        ) : (
+          <>
+            <div className="grid grid-cols-[1fr_auto_1fr] items-start sm:items-center gap-3 sm:gap-6">
+              <ProbabilitySide
+                name={a.fullName}
+                probability={p.probabilityA}
+                isFavorite={p.favorite === 'A'}
+                color={COLOR_A}
+                align="left"
+              />
+              <div className="text-center pt-8 sm:pt-10">
+                <span className="text-[10px] font-bold text-zinc-600 tracking-widest" aria-hidden="true">
+                  VS
+                </span>
+                <p className="text-[11px] text-zinc-500 mt-1 capitalize">{p.marginLabel}</p>
+              </div>
+              <ProbabilitySide
+                name={b.fullName}
+                probability={p.probabilityB}
+                isFavorite={p.favorite === 'B'}
+                color={COLOR_B}
+                align="right"
+              />
+            </div>
+            <p className="text-center text-sm text-zinc-300 mt-5">
+              Favori du modèle :{' '}
+              <strong className="text-zinc-50">{p.favoriteName}</strong>{' '}
+              <span className="text-zinc-500">
+                ({Math.max(p.probabilityA ?? 0, p.probabilityB ?? 0)} % de chances estimées)
+              </span>
+            </p>
+          </>
+        )}
+
+        {/* Probabilités présentées comme estimation, jamais certitude */}
+        <p className="text-[11px] text-zinc-500 text-center mt-2">
+          Probabilité estimée par agrégation pondérée des statistiques observées — bornée entre 25 % et 75 %,
+          ce n&apos;est ni une certitude ni une cote.
+        </p>
+      </article>
+
+      {/* Méthode de victoire la plus probable */}
+      {p.method && (
+        <article className="glass rounded-2xl p-5">
+          <h3 className="font-semibold text-zinc-100 inline-flex items-center gap-2 mb-2.5 text-sm">
+            <Crosshair className="h-4 w-4 text-rose-300" aria-hidden="true" />
+            Issue la plus probable chez le favori
+          </h3>
+          <p className="text-sm text-zinc-300">
+            {p.method.label}
+            {p.method.share != null && (
+              <span className="text-zinc-500"> — {p.method.share} % de ses victoires</span>
+            )}
+          </p>
+          <p className="text-xs text-zinc-500 mt-1.5">{p.method.detail}</p>
+        </article>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Facteurs clés */}
+        {p.keyFactors.length > 0 && (
+          <article className="glass rounded-2xl p-5">
+            <h3 className="font-semibold text-zinc-100 inline-flex items-center gap-2 mb-3 text-sm">
+              <CheckCircle2 className="h-4 w-4 text-emerald-300" aria-hidden="true" />
+              Pourquoi {p.favoriteName ?? 'ce favori'}
+            </h3>
+            <ul className="space-y-3">
+              {p.keyFactors.map((f, i) => (
+                <li key={i} className="text-sm">
+                  <p className="text-zinc-200 font-medium">{f.title}</p>
+                  <p className="text-xs text-zinc-500 mt-0.5 leading-relaxed">{f.text}</p>
+                </li>
+              ))}
+            </ul>
+          </article>
+        )}
+
+        {/* Points de vigilance */}
+        {p.watchOuts.length > 0 && (
+          <article className="glass rounded-2xl p-5">
+            <h3 className="font-semibold text-zinc-100 inline-flex items-center gap-2 mb-3 text-sm">
+              <AlertTriangle className="h-4 w-4 text-amber-300" aria-hidden="true" />
+              Points de vigilance
+            </h3>
+            <ul className="space-y-3">
+              {p.watchOuts.map((f, i) => (
+                <li key={i} className="text-sm">
+                  <p className="text-zinc-200 font-medium">{f.title}</p>
+                  <p className="text-xs text-zinc-500 mt-0.5 leading-relaxed">{f.text}</p>
+                </li>
+              ))}
+            </ul>
+            <p className="text-[11px] text-zinc-600 mt-3">
+              Un combat ne se réduit pas à ses statistiques : scénarios de blessure, enjeux de titre et
+              dynamique du soir restent hors de portée du modèle.
+            </p>
+          </article>
+        )}
+      </div>
+
+      {/* Méthodologie dépliable */}
+      <article className="glass-soft rounded-2xl">
+        <button
+          type="button"
+          onClick={() => setMethodologyOpen((v) => !v)}
+          aria-expanded={methodologyOpen}
+          className="w-full flex items-center justify-between gap-2 px-5 py-4 text-sm font-semibold text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/50 rounded-2xl"
+        >
+          <span className="inline-flex items-center gap-2">
+            <Info className="h-4 w-4 text-violet-300" aria-hidden="true" />
+            Comment ce pronostic est calculé
+          </span>
+          <ChevronDown
+            className={cn('h-4 w-4 text-zinc-500 transition-transform', methodologyOpen && 'rotate-180')}
+            aria-hidden="true"
+          />
+        </button>
+        {methodologyOpen && (
+          <div className="px-5 pb-5 space-y-4">
+            <p className="text-xs text-zinc-400 leading-relaxed">
+              Chaque dimension comparative (source : stats de carrière ESPN et indicateurs calculés sur les
+              10 derniers combats) produit un indice relatif 0-100 pour chaque combattant. Le modèle agrège
+              ces indices avec les poids ci-dessous, transforme l&apos;avantage en probabilité (fonction
+              logistique) puis la borne entre 25 % et 75 %.
+            </p>
+            <div className="overflow-x-auto voltrix-scroll">
+              <table className="w-full text-xs min-w-[420px]">
+                <thead>
+                  <tr className="text-zinc-500 text-left border-b border-white/8">
+                    <th className="py-2 pr-3 font-medium">Dimension</th>
+                    <th className="py-2 pr-3 font-medium">Poids</th>
+                    <th className="py-2 pr-3 font-medium">{a.fullName.split(' ').slice(-1)[0]}</th>
+                    <th className="py-2 pr-3 font-medium">{b.fullName.split(' ').slice(-1)[0]}</th>
+                    <th className="py-2 font-medium">Écart</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {p.model.factors.map((f) => (
+                    <tr key={f.key} className="border-b border-white/5">
+                      <td className="py-2 pr-3 text-zinc-300">{f.label}</td>
+                      <td className="py-2 pr-3 text-zinc-500 font-mono">×{f.weight}</td>
+                      <td className="py-2 pr-3 font-mono" style={{ color: COLOR_A }}>
+                        {Math.round(f.scoreA)}
+                      </td>
+                      <td className="py-2 pr-3 font-mono" style={{ color: COLOR_B }}>
+                        {Math.round(f.scoreB)}
+                      </td>
+                      <td
+                        className={cn(
+                          'py-2 font-mono',
+                          f.edge > 0 ? 'text-violet-300' : f.edge < 0 ? 'text-rose-300' : 'text-zinc-500'
+                        )}
+                      >
+                        {f.edge > 0 ? '+' : ''}
+                        {Math.round(f.edge)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <ul className="space-y-1.5">
+              {p.model.notes.map((n, i) => (
+                <li key={i} className="text-[11px] text-zinc-500 leading-relaxed">
+                  · {n}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </article>
+    </div>
+  )
+}
+
+function ProbabilitySide({
+  name,
+  probability,
+  isFavorite,
+  color,
+  align,
+}: {
+  name: string
+  probability: number | null
+  isFavorite: boolean
+  color: string
+  align: 'left' | 'right'
+}) {
+  return (
+    <div className={cn('min-w-0', align === 'right' && 'text-right')}>
+      <p
+        className={cn(
+          'font-semibold text-sm sm:text-base truncate',
+          isFavorite ? 'text-zinc-50' : 'text-zinc-400'
+        )}
+      >
+        {name}
+      </p>
+      <p className="text-3xl sm:text-4xl font-black tabular-nums mt-1.5" style={{ color }}>
+        {probability != null ? `${probability} %` : '—'}
+      </p>
+      <div className="h-1.5 rounded-full bg-white/8 mt-2 overflow-hidden" aria-hidden="true">
+        <div
+          className={cn('h-full rounded-full transition-all', align === 'right' && 'ml-auto')}
+          style={{ width: `${probability ?? 0}%`, background: color }}
+        />
+      </div>
+      {isFavorite && (
+        <p className="text-[10px] text-emerald-300 mt-1.5 font-semibold tracking-wide uppercase">
+          Favori
+        </p>
+      )}
+    </div>
   )
 }
 

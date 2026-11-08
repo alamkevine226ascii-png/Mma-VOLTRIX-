@@ -8,7 +8,9 @@
  *  - détection des placeholders (TBA)
  *  - cohérence des statistiques en base (plages de validité)
  *  - gestion des données manquantes (null, jamais de valeur fabriquée)
+ *  - moteur de pronostics (favori, bornes, refus sans données, backtest)
  *  - récupération réelle des événements et combattants (API locale + ESPN)
+ *  - absence totale de football (suppression complète)
  */
 import { describe, expect, test } from 'bun:test'
 import { db } from '@/lib/db'
@@ -25,7 +27,16 @@ import {
 } from '@/modules/mma/types'
 import { parseExternalIds, parseFightUid, espnProvider } from '@/modules/mma/providers/espn'
 import { isPlaceholderFighter } from '@/modules/mma/services/sync'
-import { computeDerivedStats, DERIVED_WINDOW } from '@/modules/mma/services/analysis'
+import { DERIVED_WINDOW, buildDimensions } from '@/modules/mma/services/analysis'
+import {
+  computePrediction,
+  computeExpressPrediction,
+  DIMENSION_WEIGHTS,
+  P_MIN,
+  P_MAX,
+  MODEL_VERSION,
+} from '@/modules/mma/services/prediction'
+import { backtestPredictions } from '@/modules/mma/services/backtest'
 
 const BASE = 'http://localhost:3000'
 
@@ -314,7 +325,7 @@ describe('API locale (serveur de développement)', () => {
     expect(withWeight).toBeGreaterThan(0)
   })
 
-  test('GET /api/mma/fights/[id] : analyse complète (observé + interprétation + sources)', async () => {
+  test('GET /api/mma/fights/[id] : analyse complète (observé + interprétation + pronostic + sources)', async () => {
     const list = await (await fetch(`${BASE}/api/mma/events?window=upcoming`)).json() as { events: { id: string }[] }
     const detail = await (await fetch(`${BASE}/api/mma/events/${list.events[0].id}`)).json() as {
       event: { fights: { id: string; fighters: unknown[] }[] }
@@ -326,6 +337,7 @@ describe('API locale (serveur de développement)', () => {
       observed: { label: string }[]
       dimensions: { label: string; available: boolean }[]
       commentary: { title: string }[]
+      prediction: { available: boolean; probabilityA: number | null; probabilityB: number | null }
       limitations: string[]
       sources: { name: string }[]
     }
@@ -335,6 +347,17 @@ describe('API locale (serveur de développement)', () => {
     expect(analysis.commentary.length).toBeGreaterThan(0)
     expect(analysis.limitations.length).toBeGreaterThan(0)
     expect(analysis.sources.length).toBeGreaterThan(0)
+    // Le pronostic est présent ; s'il est disponible, ses probabilités sont
+    // cohérentes, complémentaires et bornées.
+    expect(analysis.prediction).toBeDefined()
+    if (analysis.prediction.available) {
+      const { probabilityA, probabilityB } = analysis.prediction
+      expect(probabilityA).not.toBeNull()
+      expect(probabilityB).not.toBeNull()
+      expect((probabilityA as number) + (probabilityB as number)).toBe(100)
+      expect(probabilityA as number).toBeGreaterThanOrEqual(P_MIN)
+      expect(probabilityA as number).toBeLessThanOrEqual(P_MAX)
+    }
   })
 
   test('GET /api/mma/sync : journaux et compteurs présents', async () => {
@@ -349,14 +372,32 @@ describe('API locale (serveur de développement)', () => {
     expect(body.logs.length).toBeGreaterThan(0)
   })
 
-  test('GET /api/football/matches : moteur football intact (non-régression)', async () => {
-    const res = await fetch(`${BASE}/api/football/matches`)
+  test('GET /api/mma/predictions : backtest public du modèle', async () => {
+    const res = await fetch(`${BASE}/api/mma/predictions`)
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { matches: { id: string; homeTeam: string; awayTeam: string; status: string }[] }
-    expect(body.matches.length).toBeGreaterThan(0)
-    for (const m of body.matches) {
-      expect(['PROGRAMME', 'EN_COURS', 'TERMINE']).toContain(m.status)
+    const body = (await res.json()) as {
+      model: string
+      analyzed: number
+      correct: number
+      accuracyPct: number | null
+      byConfidence: { label: string; analyzed: number; correct: number }[]
+      notes: string[]
     }
+    expect(body.model).toBe(MODEL_VERSION)
+    expect(body.analyzed).toBeGreaterThanOrEqual(0)
+    expect(body.correct).toBeLessThanOrEqual(body.analyzed)
+    if (body.analyzed > 0) {
+      expect(body.accuracyPct).not.toBeNull()
+      expect(body.accuracyPct as number).toBeGreaterThanOrEqual(0)
+      expect(body.accuracyPct as number).toBeLessThanOrEqual(100)
+    }
+    expect(body.byConfidence).toHaveLength(3)
+    expect(body.notes.length).toBeGreaterThan(0)
+  })
+
+  test('suppression du football : la route /api/football/matches n\u2019existe plus', async () => {
+    const res = await fetch(`${BASE}/api/football/matches`)
+    expect(res.status).toBe(404)
   })
 })
 
@@ -389,8 +430,205 @@ describe('Adaptateur ESPN (accès réel)', () => {
     expect(['W', 'L', 'D', 'NC']).toContain(history[0].result)
   })
 
-  test('donnée inexistante : 404 -> null (pas d\'invention)', async () => {
-    const missing = await espnProvider.getFighterProfile('999999999999')
-    expect(missing).toBeNull()
+  test('donnée inexistante : null ou erreur explicite, jamais d\'invention', async () => {
+    // Un identifiant inexistant renvoie 404 -> null. En cas de bridage
+    // intermittent du CDN (403/429, observé le 2026-11-08), l'erreur est
+    // propagée — dans les deux cas, AUCUNE donnée n'est fabriquée.
+    let result: unknown = 'unset'
+    let threw = false
+    try {
+      result = await espnProvider.getFighterProfile('999999999999')
+    } catch {
+      threw = true
+    }
+    if (threw) {
+      expect(result).toBe('unset') // l'erreur a été propagée, rien de fabriqué
+    } else {
+      expect(result).toBeNull()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 9. Moteur de pronostics
+// ---------------------------------------------------------------------------
+
+describe('Moteur de pronostics (voltrix-mma-v1)', () => {
+  // Vues factices minimales mais réalistes (mêmes formes que FighterView)
+  const makeFighter = (over: Partial<Parameters<typeof computePrediction>[0][number]> = {}): Parameters<typeof computePrediction>[0][number] => ({
+    id: 'f1',
+    externalId: 'espn:athlete:1',
+    fullName: 'Combattant A',
+    nickname: null,
+    imageUrl: null,
+    flagUrl: null,
+    nationality: null,
+    birthDate: null,
+    age: null,
+    heightCm: null,
+    reachCm: null,
+    weightLbs: null,
+    weightClass: null,
+    stance: null,
+    fightingStyle: null,
+    record: { wins: null, losses: null, draws: null, noContests: null, winsByKo: null, winsBySub: null },
+    lastResults: [],
+    totalFights: null,
+    stats: null,
+    derived: null,
+    recentHistory: [],
+    sourceUrl: null,
+    lastSyncedAt: new Date().toISOString(),
+    ...over,
+  })
+
+  const strongFighter = makeFighter({
+    externalId: 'espn:athlete:strong',
+    fullName: 'Favori Fort',
+    record: { wins: 20, losses: 2, draws: 0, noContests: 0, winsByKo: 12, winsBySub: 5 },
+    lastResults: ['W', 'W', 'W', 'W', 'W'],
+    totalFights: 22,
+    stats: {
+      sigStrikesLandedPerMin: 6.2,
+      strikingAccuracy: 58,
+      takedownsPer15Min: 1.8,
+      takedownAccuracy: 55,
+      submissionsPer15Min: 0.8,
+      koPercentage: 55,
+      tkoPercentage: 5,
+      decisionPercentage: 20,
+      syncedAt: new Date().toISOString(),
+    },
+  })
+
+  const weakFighter = makeFighter({
+    externalId: 'espn:athlete:weak',
+    fullName: 'Challenger Faible',
+    record: { wins: 6, losses: 8, draws: 0, noContests: 0, winsByKo: 1, winsBySub: 1 },
+    lastResults: ['L', 'L', 'W', 'L', 'L'],
+    totalFights: 14,
+    stats: {
+      sigStrikesLandedPerMin: 2.4,
+      strikingAccuracy: 38,
+      takedownsPer15Min: 0.4,
+      takedownAccuracy: 25,
+      submissionsPer15Min: 0.1,
+      koPercentage: 15,
+      tkoPercentage: 2,
+      decisionPercentage: 70,
+      syncedAt: new Date().toISOString(),
+    },
+  })
+
+  test('favori désigné et probabilités cohérentes sur écart net', () => {
+    const dims = buildDimensions(strongFighter, weakFighter)
+    const p = computePrediction(strongFighter, weakFighter, dims)
+    expect(p.available).toBe(true)
+    expect(p.favorite).toBe('A')
+    expect(p.favoriteName).toBe('Favori Fort')
+    expect(p.probabilityA).not.toBeNull()
+    expect((p.probabilityA as number) + (p.probabilityB as number)).toBe(100)
+    expect(p.probabilityA as number).toBeGreaterThan(50)
+    // Bornes honnêtes : jamais de certitude
+    expect(p.probabilityA as number).toBeLessThanOrEqual(P_MAX)
+    expect(p.probabilityB as number).toBeGreaterThanOrEqual(P_MIN)
+    expect(p.keyFactors.length).toBeGreaterThan(0)
+    expect(p.confidence).not.toBeNull()
+  })
+
+  test('symétrie : inverser les combattants inverse le pronostic', () => {
+    const d1 = buildDimensions(strongFighter, weakFighter)
+    const d2 = buildDimensions(weakFighter, strongFighter)
+    const p1 = computePrediction(strongFighter, weakFighter, d1)
+    const p2 = computePrediction(weakFighter, strongFighter, d2)
+    expect(p1.probabilityA).toBe(p2.probabilityB)
+    expect(p1.favoriteName).toBe(p2.favoriteName)
+  })
+
+  test('données insuffisantes -> refus explicite, jamais d\u2019invention', () => {
+    const empty = makeFighter()
+    const dims = buildDimensions(empty, makeFighter({ fullName: 'Autre' }))
+    const p = computePrediction(empty, makeFighter({ fullName: 'Autre' }), dims)
+    expect(p.available).toBe(false)
+    expect(p.unavailabilityReason).toContain('insuffisantes')
+    expect(p.favorite).toBeNull()
+    expect(p.probabilityA).toBeNull()
+  })
+
+  test('méthode de victoire prédite cohérente avec le palmarès', () => {
+    const dims = buildDimensions(strongFighter, weakFighter)
+    const p = computePrediction(strongFighter, weakFighter, dims)
+    expect(p.method).not.toBeNull()
+    // 12 KO sur 20 victoires -> KO/TKO majoritaire
+    expect(p.method?.label).toBe('KO/TKO')
+    expect(p.method?.share).not.toBeNull()
+  })
+
+  test('pronostic express : palmarès et forme seulement, borné', () => {
+    const e = computeExpressPrediction(
+      { fullName: 'A', wins: 20, losses: 2, draws: 0, lastResults: 'W,W,W', recordAtFight: null },
+      { fullName: 'B', wins: 5, losses: 9, draws: 0, lastResults: 'L,L,L', recordAtFight: null }
+    )
+    expect(e.available).toBe(true)
+    expect(e.favoriteName).toBe('A')
+    expect(e.probability).not.toBeNull()
+    expect(e.probability as number).toBeGreaterThanOrEqual(50)
+    expect(e.probability as number).toBeLessThanOrEqual(70)
+    expect(e.level).toBe('avantage net')
+  })
+
+  test('pronostic express : données manquantes -> indisponible', () => {
+    const e = computeExpressPrediction(
+      { fullName: 'A', wins: null, losses: null, draws: null, lastResults: null, recordAtFight: null },
+      { fullName: 'B', wins: null, losses: null, draws: null, lastResults: null, recordAtFight: null }
+    )
+    expect(e.available).toBe(false)
+    expect(e.favoriteName).toBeNull()
+  })
+
+  test('poids du modèle : 11 dimensions documentées', () => {
+    expect(Object.keys(DIMENSION_WEIGHTS)).toHaveLength(11)
+    for (const w of Object.values(DIMENSION_WEIGHTS)) {
+      expect(w).toBeGreaterThan(0)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 10. Backtest public (fiabilité mesurée sur données réelles)
+// ---------------------------------------------------------------------------
+
+describe('Backtest du moteur de pronostics (combats terminés en base)', () => {
+  test('exécution et cohérence des compteurs', async () => {
+    const r = await backtestPredictions(60)
+    expect(r.model).toBe(MODEL_VERSION)
+    expect(r.correct).toBeLessThanOrEqual(r.analyzed)
+    expect(r.byConfidence).toHaveLength(3)
+    const sum = r.byConfidence.reduce((acc, c) => acc + c.analyzed, 0)
+    expect(sum).toBe(r.analyzed)
+    if (r.analyzed > 0) {
+      expect(r.accuracyPct).toBe(Math.round((r.correct / r.analyzed) * 100))
+      // chaque combat testé référence bien un favori et un vainqueur
+      for (const f of r.fights) {
+        expect(f.predictedFavorite).not.toBe('?')
+        expect(f.probability).toBeGreaterThanOrEqual(P_MIN)
+        expect(f.probability).toBeLessThanOrEqual(P_MAX)
+      }
+    }
+    // le biais de recul est explicitement documenté
+    expect(r.notes.join(' ').toLowerCase()).toContain('biais')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 11. Suppression complète du football
+// ---------------------------------------------------------------------------
+
+describe('Suppression du module football', () => {
+  test('plus aucune trace football en base (SyncLog, ApiCache)', async () => {
+    const footballLogs = await db.syncLog.count({ where: { module: 'football' } })
+    expect(footballLogs).toBe(0)
+    const soccerCache = await db.apiCache.count({ where: { key: { contains: 'soccer' } } })
+    expect(soccerCache).toBe(0)
   })
 })

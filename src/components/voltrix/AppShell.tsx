@@ -30,7 +30,7 @@ export function AppShell({ tab, onTabChange, children }: AppShellProps) {
                   <span className="voltrix-gradient-text">VOLTRIX</span>
                 </p>
                 <p className="text-[11px] text-zinc-500 leading-tight truncate">
-                  Données sportives · sourcées &amp; datées
+                  MMA · statistiques sourcées &amp; pronostics datés
                 </p>
               </div>
             </div>
@@ -62,7 +62,8 @@ export function AppShell({ tab, onTabChange, children }: AppShellProps) {
           <div className="voltrix-divider mb-4" />
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs text-zinc-500">
             <p>
-              VOLTRIX — données ESPN (usage personnel, non commercial). Aucune cote, aucune recommandation de paris.
+              VOLTRIX — pronostics MMA sur données ESPN (usage personnel, non commercial). Aucune cote,
+              aucun conseil de paris.
             </p>
             <p>Les statistiques manquantes sont affichées « Non disponible », jamais estimées.</p>
           </div>

@@ -52,6 +52,7 @@ export interface MmaEventFight {
   resultDetail: string | null
   durationSeconds: number | null
   winnerExternalId: string | null
+  expressPrediction: ExpressPredictionView | null
   fighters: MmaEventFighter[]
 }
 
@@ -71,6 +72,7 @@ export interface MmaEventDetail {
 
 export interface FighterView {
   id: string
+  externalId: string
   fullName: string
   nickname: string | null
   imageUrl: string | null
@@ -150,6 +152,78 @@ export interface CommentaryBlock {
   text: string
 }
 
+export interface PredictionFactorView {
+  key: string
+  label: string
+  weight: number
+  scoreA: number
+  scoreB: number
+  edge: number
+}
+
+export interface PredictionView {
+  available: boolean
+  unavailabilityReason: string | null
+  favorite: 'A' | 'B' | null
+  favoriteName: string | null
+  favoriteExternalId: string | null
+  underdogName: string | null
+  probabilityA: number | null
+  probabilityB: number | null
+  marginLabel: string | null
+  confidence: {
+    score: number
+    label: 'Bonne' | 'Moyenne' | 'Limitée'
+    dimensionsUsed: number
+    dimensionsTotal: number
+    missing: string[]
+  } | null
+  method: {
+    label: string
+    share: number | null
+    detail: string
+  } | null
+  keyFactors: { title: string; text: string }[]
+  watchOuts: { title: string; text: string }[]
+  model: {
+    version: string
+    computedAt: string
+    factors: PredictionFactorView[]
+    notes: string[]
+  }
+}
+
+export interface ExpressPredictionView {
+  available: boolean
+  favoriteName: string | null
+  probability: number | null
+  level: 'avantage net' | 'avantage léger' | 'indécis'
+  basis: string
+}
+
+export interface BacktestSummary {
+  model: string
+  analyzed: number
+  correct: number
+  accuracyPct: number | null
+  byConfidence: { label: string; analyzed: number; correct: number }[]
+  fights: {
+    fightId: string
+    eventName: string | null
+    date: string
+    fighterA: string
+    fighterB: string
+    predictedFavorite: string
+    probability: number
+    actualWinner: string
+    correct: boolean
+    confidence: string
+  }[]
+  skippedInsufficientData: number
+  skippedTooClose: number
+  notes: string[]
+}
+
 export interface FightAnalysis {
   fight: {
     id: string
@@ -175,6 +249,7 @@ export interface FightAnalysis {
   dimensions: DimensionScore[]
   radar: { dimension: string; A: number | null; B: number | null }[]
   commentary: CommentaryBlock[]
+  prediction: PredictionView
   limitations: string[]
   sources: { name: string; url: string | null; detail: string; syncedAt: string }[]
   derivedPending: boolean

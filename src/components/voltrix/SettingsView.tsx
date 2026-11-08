@@ -2,11 +2,12 @@
 
 /**
  * VOLTRIX — Vue Paramètres : sources de données, synchronisation,
- * journaux, informations légales.
+ * fiabilité du moteur de pronostics, journaux, informations légales.
  */
 import { useState } from 'react'
-import { CheckCircle2, Database, Globe2, RefreshCw, ScrollText, ShieldCheck, XCircle } from 'lucide-react'
+import { CheckCircle2, Database, Globe2, RefreshCw, ScrollText, ShieldCheck, Sparkles, Target, XCircle } from 'lucide-react'
 import { useApi, formatDateTimeFr } from '@/components/voltrix/api'
+import { BacktestSummary } from '@/components/mma/types'
 import { cn } from '@/lib/utils'
 
 interface SyncLogEntry {
@@ -43,7 +44,6 @@ interface SyncStatusResponse {
 const JOB_LABELS: Record<string, string> = {
   events: 'Événements & combats',
   'event-details': 'Détails des combats',
-  matches: 'Matchs football',
 }
 
 export function SettingsView() {
@@ -95,9 +95,10 @@ export function SettingsView() {
         <div className="space-y-3 text-sm">
           <div className="flex items-start justify-between gap-4 rounded-xl px-4 py-3 bg-white/[0.03] border border-white/5">
             <div>
-              <p className="text-zinc-200 font-medium">Module Football</p>
+              <p className="text-zinc-200 font-medium">Module MMA</p>
               <p className="text-xs text-zinc-500 mt-0.5">
-                ESPN Soccer · Premier League, LaLiga, Serie A, Bundesliga, Ligue 1, Ligue des Champions
+                ESPN MMA · UFC, PFL (actifs), Bellator (historique) · endpoints vérifiés le 08/11/2026 ·
+                événements, combats, combattants, statistiques de carrière
               </p>
             </div>
             <span className="text-[10px] text-emerald-200 bg-emerald-400/10 border border-emerald-300/25 px-2 py-1 rounded-md shrink-0">
@@ -106,12 +107,13 @@ export function SettingsView() {
           </div>
           <div className="flex items-start justify-between gap-4 rounded-xl px-4 py-3 bg-white/[0.03] border border-white/5">
             <div>
-              <p className="text-zinc-200 font-medium">Module MMA</p>
+              <p className="text-zinc-200 font-medium">Moteur de pronostics</p>
               <p className="text-xs text-zinc-500 mt-0.5">
-                ESPN MMA · UFC, PFL (actifs), Bellator (historique) · endpoints vérifiés le 08/11/2026
+                Modèle voltrix-mma-v1 · agrégation pondérée de 11 dimensions statistiques, probabilités
+                bornées 25-75 %, fiabilité mesurée par backtest sur les combats terminés
               </p>
             </div>
-            <span className="text-[10px] text-emerald-200 bg-emerald-400/10 border border-emerald-300/25 px-2 py-1 rounded-md shrink-0">
+            <span className="text-[10px] text-violet-200 bg-violet-400/10 border border-violet-300/25 px-2 py-1 rounded-md shrink-0">
               ACTIF
             </span>
           </div>
@@ -160,6 +162,9 @@ export function SettingsView() {
           </p>
         )}
       </section>
+
+      {/* Fiabilité des pronostics */}
+      <PredictionReliabilitySection />
 
       {/* Journaux */}
       <section className="glass rounded-2xl p-5" aria-labelledby="logs-title">
@@ -212,15 +217,114 @@ export function SettingsView() {
           <li>· Aucune donnée fabriquée : une valeur absente reste « Non disponible ».</li>
           <li>· Chaque statistique porte sa source et sa date de synchronisation.</li>
           <li>· Les indicateurs calculés (fenêtre 10 combats) sont explicitement étiquetés.</li>
-          <li>· Aucune cote, aucune recommandation de paris — par conception.</li>
-          <li>· Les cotes éventuellement présentes chez la source sont ignorées.</li>
+          <li>· Pronostics fondés uniquement sur des dimensions observées, pondérations publiques, probabilités bornées 25-75 %.</li>
+          <li>· Pas de pronostic sans données suffisantes — refus explicite plutôt qu&apos;extrapolation.</li>
+          <li>· Pronostics informatifs : VOLTRIX n&apos;édite aucune cote et ne donne aucun conseil de paris.</li>
         </ul>
       </section>
     </div>
   )
 }
 
-function Stat({ label, value }: { label: string; value: number | undefined }) {
+/** Section fiabilité : backtest public du moteur de pronostics. */
+function PredictionReliabilitySection() {
+  const { data, loading, error, reload } = useApi<BacktestSummary>('/api/mma/predictions')
+  const [showFights, setShowFights] = useState(false)
+
+  return (
+    <section className="glass rounded-2xl p-5" aria-labelledby="pronostic-title">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+        <h3 id="pronostic-title" className="font-semibold text-zinc-100 flex items-center gap-2">
+          <Target className="h-4 w-4 text-violet-300" aria-hidden="true" />
+          Fiabilité du moteur de pronostics
+        </h3>
+        <button
+          type="button"
+          onClick={() => void reload()}
+          className="text-xs text-zinc-400 hover:text-violet-300 inline-flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/50 rounded-lg px-2 py-1"
+        >
+          <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} aria-hidden="true" />
+          Recalculer
+        </button>
+      </div>
+
+      {loading && !data && <div className="glass-soft rounded-xl h-24 voltrix-pulse" aria-hidden="true" />}
+
+      {error && (
+        <p className="text-sm text-amber-200/90">
+          Backtest momentanément indisponible : {error}. Les pronostics par combat restent calculés en temps réel.
+        </p>
+      )}
+
+      {data && (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-4">
+            <Stat label="Combats testés" value={data.analyzed} />
+            <Stat label="Favoris confirmés" value={data.correct} />
+            <Stat label="Taux de réussite" value={data.accuracyPct != null ? `${data.accuracyPct} %` : undefined} />
+            <Stat label="Combats serrés exclus" value={data.skippedTooClose + data.skippedInsufficientData} />
+          </div>
+          <p className="text-xs text-zinc-500 leading-relaxed mb-3">
+            Le modèle {data.model} est recalculé sur les combats terminés présents en base (données ESPN
+            synchronisées) et confronté aux vainqueurs réels. Le résultat est publié tel quel, y compris
+            s&apos;il est défavorable. Ventilation par fiabilité des données :{' '}
+            {data.byConfidence
+              .map((c) => `${c.label.toLowerCase()} ${c.correct}/${c.analyzed}`)
+              .join(' · ')}
+            .
+          </p>
+          {data.fights.length > 0 && (
+            <>
+              <button
+                type="button"
+                onClick={() => setShowFights((v) => !v)}
+                aria-expanded={showFights}
+                className="text-xs text-violet-300 hover:text-violet-200 inline-flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/50 rounded-lg px-2 py-1 -ml-2"
+              >
+                <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
+                {showFights ? 'Masquer' : 'Voir'} les derniers combats testés
+              </button>
+              {showFights && (
+                <ul className="mt-3 space-y-2 max-h-72 overflow-y-auto voltrix-scroll pr-1">
+                  {data.fights.map((f) => (
+                    <li
+                      key={f.fightId}
+                      className="flex items-start gap-2.5 rounded-xl px-3.5 py-2.5 bg-white/[0.03] border border-white/5 text-sm"
+                    >
+                      {f.correct ? (
+                        <CheckCircle2 className="h-4 w-4 text-emerald-300 mt-0.5 shrink-0" aria-hidden="true" />
+                      ) : (
+                        <XCircle className="h-4 w-4 text-red-300 mt-0.5 shrink-0" aria-hidden="true" />
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <p className="text-zinc-200">
+                          {f.fighterA} <span className="text-zinc-500">vs.</span> {f.fighterB}
+                        </p>
+                        <p className="text-[11px] text-zinc-500">
+                          Favori : {f.predictedFavorite} ({f.probability} %) · Vainqueur réel : {f.actualWinner}
+                          {f.eventName ? ` · ${f.eventName}` : ''}
+                        </p>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
+          <ul className="mt-3 space-y-1">
+            {data.notes.map((n, i) => (
+              <li key={i} className="text-[11px] text-zinc-600 leading-relaxed">
+                · {n}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  )
+}
+
+function Stat({ label, value }: { label: string; value: string | number | undefined }) {
   return (
     <div className="rounded-xl bg-white/[0.03] border border-white/5 px-3 py-2.5">
       <p className="text-lg font-bold text-zinc-100 tabular-nums">{value ?? '—'}</p>

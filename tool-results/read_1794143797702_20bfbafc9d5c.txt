@@ -1,0 +1,681 @@
+     1→/**
+     2→ * MODULE MMA — Moteur d'analyse statistique.
+     3→ *
+     4→ * Principes (exigences VOLTRIX) :
+     5→ *  1. Données observées et interprétations STRICTEMENT séparées.
+     6→ *  2. Une statistique manquante est affichée "Non disponible", jamais estimée.
+     7→ *  3. Les indicateurs non fournis par la source (frappes reçues/minute,
+     8→ *     défenses, temps moyen) sont CALCULÉS à partir des statistiques par
+     9→ *     combat sur une fenêtre explicite (par défaut 10 combats), et étiquetés
+    10→ *     comme tels avec leur date de calcul.
+    11→ *  4. Aucune probabilité présentée comme certitude ; aucun indice de paris.
+    12→ *
+    13→ * Normalisation des avantages : pour un indicateur où "plus haut = mieux",
+    14→ * score A = A / (A + B) * 100. Pour "plus bas = mieux" (absorption), la
+    15→ * formule est inversée. Cette normalisation relative ne prédit rien : elle
+    16→ * quantifie l'écart observé.
+    17→ */
+    18→import { db } from '@/lib/db'
+    19→import {
+    20→  espnProvider,
+    21→  ESPN_LEAGUE_UIDS,
+    22→  parseExternalIds,
+    23→} from '@/modules/mma/providers/espn'
+    24→import { fightDurationSeconds, formScore } from '@/modules/mma/types'
+    25→import { enrichEvent, enrichFighter } from '@/modules/mma/services/sync'
+    26→
+    27→export const DERIVED_WINDOW = 10
+    28→
+    29→// ---------------------------------------------------------------------------
+    30→// Vues sérialisables pour l'API
+    31→// ---------------------------------------------------------------------------
+    32→
+    33→export interface FighterView {
+    34→  id: string
+    35→  fullName: string
+    36→  nickname: string | null
+    37→  imageUrl: string | null
+    38→  flagUrl: string | null
+    39→  nationality: string | null
+    40→  birthDate: string | null
+    41→  age: number | null
+    42→  heightCm: number | null
+    43→  reachCm: number | null
+    44→  weightLbs: number | null
+    45→  weightClass: string | null
+    46→  stance: string | null
+    47→  fightingStyle: string | null
+    48→  record: { wins: number | null; losses: number | null; draws: number | null; noContests: number | null; winsByKo: number | null; winsBySub: number | null }
+    49→  lastResults: string[] 
+    50→  totalFights: number | null
+    51→  stats: {
+    52→    sigStrikesLandedPerMin: number | null
+    53→    strikingAccuracy: number | null
+    54→    takedownsPer15Min: number | null
+    55→    takedownAccuracy: number | null
+    56→    submissionsPer15Min: number | null
+    57→    koPercentage: number | null
+    58→    tkoPercentage: number | null
+    59→    decisionPercentage: number | null
+    60→    syncedAt: string | null
+    61→  } | null
+    62→  derived: {
+    63→    windowSize: number
+    64→    sigStrikesAbsorbedPerMin: number | null
+    65→    strikingDefense: number | null
+    66→    takedownDefense: number | null
+    67→    avgFightSeconds: number | null
+    68→    fightsUsed: number
+    69→    fightsSkipped: number
+    70→    computedAt: string
+    71→  } | null
+    72→  recentHistory: {
+    73→    eventDate: string
+    74→    eventName: string | null
+    75→    result: string
+    76→    opponentName: string
+    77→    titleFight: boolean
+    78→  }[]
+    79→  sourceUrl: string | null
+    80→  lastSyncedAt: string
+    81→}
+    82→
+    83→export interface ObservedRow {
+    84→  label: string
+    85→  valueA: string
+    86→  valueB: string
+    87→  kind: 'bio' | 'record' | 'career' | 'derived'
+    88→  origin: string // "ESPN — fiche combattant" / "Calculé sur les N derniers combats"
+    89→}
+    90→
+    91→export interface DimensionScore {
+    92→  key: string
+    93→  label: string
+    94→  scoreA: number | null
+    95→  scoreB: number | null
+    96→  advantage: 'A' | 'B' | '=' | null
+    97→  detail: string
+    98→  basis: string
+    99→  available: boolean
+   100→}
+   101→
+   102→export interface CommentaryBlock {
+   103→  title: string
+   104→  text: string
+   105→}
+   106→
+   107→export interface FightAnalysis {
+   108→  fight: {
+   109→    id: string
+   110→    status: string
+   111→    weightClass: string | null
+   112→    scheduledRounds: number | null
+   113→    cardSegment: string | null
+   114→    resultMethod: string | null
+   115→    resultDetail: string | null
+   116→    winner: string | null
+   117→  }
+   118→  event: {
+   119→    id: string
+   120→    name: string
+   121→    organization: string
+   122→    date: string
+   123→    venue: string | null
+   124→    city: string | null
+   125→    country: string | null
+   126→  }
+   127→  fighters: [FighterView, FighterView]
+   128→  observed: ObservedRow[]
+   129→  dimensions: DimensionScore[]
+   130→  radar: { dimension: string; A: number | null; B: number | null }[]
+   131→  commentary: CommentaryBlock[]
+   132→  limitations: string[]
+   133→  sources: { name: string; url: string | null; detail: string; syncedAt: string }[]
+   134→  derivedPending: boolean
+   135→}
+   136→
+   137→// ---------------------------------------------------------------------------
+   138→// Statistiques dérivées (calculées, fenêtre explicite)
+   139→// ---------------------------------------------------------------------------
+   140→
+   141→export async function computeDerivedStats(fighterId: string, windowSize = DERIVED_WINDOW): Promise<boolean> {
+   142→  const fighter = await db.mmaFighter.findUnique({
+   143→    where: { id: fighterId },
+   144→    include: { history: true },
+   145→  })
+   146→  if (!fighter) return false
+   147→  const parsed = parseExternalIds(fighter.externalId)
+   148→  if (!parsed || parsed.kind !== 'athlete') return false
+   149→
+   150→  const usable = fighter.history
+   151→    .filter(
+   152→      (h) =>
+   153→        h.espnEventId &&
+   154→        h.espnCompetitionId &&
+   155→        h.espnLeagueId &&
+   156→        h.opponentExternalId &&
+   157→        ESPN_LEAGUE_UIDS[h.espnLeagueId]
+   158→    )
+   159→    .sort((a, b) => b.eventDate.getTime() - a.eventDate.getTime())
+   160→    .slice(0, windowSize)
+   161→
+   162→  if (usable.length === 0) return false
+   163→
+   164→  let oppSigLanded = 0
+   165→  let oppSigAttempted = 0
+   166→  let oppTdl = 0
+   167→  let oppTda = 0
+   168→  let totalSeconds = 0
+   169→  let fightsUsed = 0
+   170→  let fightsSkipped = 0
+   171→  const usedKeys: string[] = []
+   172→
+   173→  for (const h of usable) {
+   174→    const league = ESPN_LEAGUE_UIDS[h.espnLeagueId as string]
+   175→    const oppParsed = parseExternalIds(h.opponentExternalId as string)
+   176→    if (!oppParsed || oppParsed.kind !== 'athlete') {
+   177→      fightsSkipped++
+   178→      continue
+   179→    }
+   180→    try {
+   181→      const [oppStats, status] = await Promise.all([
+   182→        espnProvider.getFightStatsFor(h.espnEventId as string, h.espnCompetitionId as string, oppParsed.espnId, league),
+   183→        espnProvider.getCompetitionStatus(league, h.espnEventId as string, h.espnCompetitionId as string),
+   184→      ])
+   185→      const duration = status ? fightDurationSeconds(status.raw) : null
+   186→      const ok =
+   187→        oppStats?.sigStrikesLanded != null &&
+   188→        oppStats?.sigStrikesAttempted != null &&
+   189→        duration != null &&
+   190→        duration > 0
+   191→      if (!ok) {
+   192→        fightsSkipped++
+   193→        continue
+   194→      }
+   195→      oppSigLanded += oppStats?.sigStrikesLanded ?? 0
+   196→      oppSigAttempted += oppStats?.sigStrikesAttempted ?? 0
+   197→      oppTdl += oppStats?.takedownsLanded ?? 0
+   198→      oppTda += oppStats?.takedownsAttempted ?? 0
+   199→      totalSeconds += duration
+   200→      fightsUsed++
+   201→      usedKeys.push(h.externalFightKey)
+   202→    } catch {
+   203→      fightsSkipped++
+   204→    }
+   205→  }
+   206→
+   207→  if (fightsUsed === 0 || totalSeconds === 0) return false
+   208→
+   209→  const totalMinutes = totalSeconds / 60
+   210→  const sapm = oppSigLanded / totalMinutes
+   211→  const strikeDef = oppSigAttempted > 0 ? (1 - oppSigLanded / oppSigAttempted) * 100 : null
+   212→  const tdDef = oppTda > 0 ? (1 - oppTdl / oppTda) * 100 : null
+   213→
+   214→  await db.mmaDerivedStats.upsert({
+   215→    where: { fighterId_windowSize: { fighterId, windowSize } },
+   216→    create: {
+   217→      fighterId,
+   218→      windowSize,
+   219→      sigStrikesAbsorbedPerMin: round2(sapm),
+   220→      strikingDefense: strikeDef == null ? null : round2(strikeDef),
+   221→      takedownDefense: tdDef == null ? null : round2(tdDef),
+   222→      avgFightSeconds: Math.round(totalSeconds / fightsUsed),
+   223→      computedFrom: JSON.stringify({ used: usedKeys, skipped: fightsSkipped }),
+   224→      computedAt: new Date(),
+   225→    },
+   226→    update: {
+   227→      sigStrikesAbsorbedPerMin: round2(sapm),
+   228→      strikingDefense: strikeDef == null ? null : round2(strikeDef),
+   229→      takedownDefense: tdDef == null ? null : round2(tdDef),
+   230→      avgFightSeconds: Math.round(totalSeconds / fightsUsed),
+   231→      computedFrom: JSON.stringify({ used: usedKeys, skipped: fightsSkipped }),
+   232→      computedAt: new Date(),
+   233→    },
+   234→  })
+   235→  return true
+   236→}
+   237→
+   238→/** Lance le calcul dérivé en arrière-plan (sans attendre). */
+   239→export function kickOffDerivedComputation(fighterIds: string[]): void {
+   240→  for (const fid of fighterIds) {
+   241→    void computeDerivedStats(fid).catch(() => undefined)
+   242→  }
+   243→}
+   244→
+   245→// ---------------------------------------------------------------------------
+   246→// Analyse d'un combat
+   247→// ---------------------------------------------------------------------------
+   248→
+   249→export async function getFightAnalysis(fightId: string): Promise<FightAnalysis | { error: string }> {
+   250→  const fight = await db.mmaFight.findUnique({
+   251→    where: { id: fightId },
+   252→    include: {
+   253→      event: true,
+   254→      fighters: { include: { fighter: { include: { stats: true, derived: true, history: true } } } },
+   255→    },
+   256→  })
+   257→  if (!fight) return { error: 'Combat introuvable' }
+   258→
+   259→  // Enrichissement à la demande (borné) : détails du combat seul + fiches
+   260→  if (!fight.event.detailsSynced) {
+   261→    await enrichEvent(fight.eventId, { fightIds: [fight.id] }).catch(() => undefined)
+   262→  }
+   263→  for (const ff of fight.fighters) {
+   264→    if (!ff.fighter.profileSynced) {
+   265→      await enrichFighter(ff.fighterId).catch(() => undefined)
+   266→    }
+   267→  }
+   268→
+   269→  const fresh = await db.mmaFight.findUnique({
+   270→    where: { id: fightId },
+   271→    include: {
+   272→      event: true,
+   273→      fighters: {
+   274→        include: { fighter: { include: { stats: true, derived: true, history: true } } },
+   275→        orderBy: { corner: 'asc' },
+   276→      },
+   277→    },
+   278→  })
+   279→  if (!fresh) return { error: 'Combat introuvable' }
+   280→  const [fa, fb] = fresh.fighters.map((ff) => ff.fighter)
+   281→  if (!fa || !fb) return { error: 'Combat incomplet : combattants manquants' }
+   282→
+   283→  const viewA = toFighterView(fa)
+   284→  const viewB = toFighterView(fb)
+   285→
+   286→  const observed = buildObservedTable(viewA, viewB)
+   287→  const dimensions = buildDimensions(viewA, viewB)
+   288→  const radar = dimensions
+   289→    .filter((d) => d.available && ['volume', 'precision', 'absorption', 'lutte', 'sol', 'forme'].includes(d.key))
+   290→    .map((d) => ({ dimension: d.label, A: d.scoreA, B: d.scoreB }))
+   291→
+   292→  const derivedPending =
+   293→    (fa.stats != null && fa.derived.length === 0) || (fb.stats != null && fb.derived.length === 0)
+   294→  if (derivedPending) {
+   295→    kickOffDerivedComputation([fa.id, fb.id].filter((id) => {
+   296→      const f = id === fa.id ? fa : fb
+   297→      return f.stats != null && f.derived.length === 0
+   298→    }))
+   299→  }
+   300→
+   301→  return {
+   302→    fight: {
+   303→      id: fresh.id,
+   304→      status: fresh.status,
+   305→      weightClass: fresh.weightClass,
+   306→      scheduledRounds: fresh.scheduledRounds,
+   307→      cardSegment: fresh.cardSegment,
+   308→      resultMethod: fresh.resultMethod,
+   309→      resultDetail: fresh.resultDetail,
+   310→      winner: fresh.winnerExternalId,
+   311→    },
+   312→    event: {
+   313→      id: fresh.event.id,
+   314→      name: fresh.event.name,
+   315→      organization: fresh.event.organization,
+   316→      date: fresh.event.date.toISOString(),
+   317→      venue: fresh.event.venueName,
+   318→      city: fresh.event.city,
+   319→      country: fresh.event.country,
+   320→    },
+   321→    fighters: [viewA, viewB],
+   322→    observed,
+   323→    dimensions,
+   324→    radar,
+   325→    commentary: buildCommentary(viewA, viewB, dimensions, fresh.weightClass),
+   326→    limitations: buildLimitations(viewA, viewB),
+   327→    sources: buildSources(viewA, viewB, fresh.event.name),
+   328→    derivedPending,
+   329→  }
+   330→}
+   331→
+   332→// ---------------------------------------------------------------------------
+   333→// Construction des vues
+   334→// ---------------------------------------------------------------------------
+   335→
+   336→function calcAge(birth: Date | null): number | null {
+   337→  if (!birth) return null
+   338→  const now = new Date()
+   339→  let age = now.getUTCFullYear() - birth.getUTCFullYear()
+   340→  const m = now.getUTCMonth() - birth.getUTCMonth()
+   341→  if (m < 0 || (m === 0 && now.getUTCDate() < birth.getUTCDate())) age--
+   342→  return age >= 15 && age <= 60 ? age : null // garde-fou : date aberrante -> non disponible
+   343→}
+   344→
+   345→type FighterWithRelations = NonNullable<
+   346→  Awaited<ReturnType<typeof loadFighter>>
+   347→>
+   348→
+   349→async function loadFighter(id: string) {
+   350→  return db.mmaFighter.findUnique({
+   351→    where: { id },
+   352→    include: { stats: true, derived: true, history: true },
+   353→  })
+   354→}
+   355→
+   356→function toFighterView(f: FighterWithRelations): FighterView {
+   357→  const derived = f.derived.find((d) => d.windowSize === DERIVED_WINDOW) ?? null
+   358→  const history = [...f.history].sort((a, b) => b.eventDate.getTime() - a.eventDate.getTime())
+   359→  const totalFights =
+   360→    f.wins != null || f.losses != null
+   361→      ? (f.wins ?? 0) + (f.losses ?? 0) + (f.draws ?? 0) + (f.noContests ?? 0)
+   362→      : null
+   363→  return {
+   364→    id: f.id,
+   365→    fullName: f.fullName,
+   366→    nickname: f.nickname,
+   367→    imageUrl: f.imageUrl,
+   368→    flagUrl: f.flagUrl,
+   369→    nationality: f.nationality,
+   370→    birthDate: f.birthDate ? f.birthDate.toISOString() : null,
+   371→    age: calcAge(f.birthDate),
+   372→    heightCm: f.heightCm,
+   373→    reachCm: f.reachCm,
+   374→    weightLbs: f.weightLbs,
+   375→    weightClass: f.weightClass,
+   376→    stance: f.stance,
+   377→    fightingStyle: f.fightingStyle,
+   378→    record: {
+   379→      wins: f.wins,
+   380→      losses: f.losses,
+   381→      draws: f.draws,
+   382→      noContests: f.noContests,
+   383→      winsByKo: f.winsByKo,
+   384→      winsBySub: f.winsBySub,
+   385→    },
+   386→    lastResults: f.lastResults ? f.lastResults.split(',').filter(Boolean) : [],
+   387→    totalFights,
+   388→    stats: f.stats
+   389→      ? {
+   390→          sigStrikesLandedPerMin: f.stats.sigStrikesLandedPerMin,
+   391→          strikingAccuracy: f.stats.strikingAccuracy,
+   392→          takedownsPer15Min: f.stats.takedownsPer15Min,
+   393→          takedownAccuracy: f.stats.takedownAccuracy,
+   394→          submissionsPer15Min: f.stats.submissionsPer15Min,
+   395→          koPercentage: f.stats.koPercentage,
+   396→          tkoPercentage: f.stats.tkoPercentage,
+   397→          decisionPercentage: f.stats.decisionPercentage,
+   398→          syncedAt: f.stats.syncedAt.toISOString(),
+   399→        }
+   400→      : null,
+   401→    derived: derived
+   402→      ? {
+   403→          windowSize: derived.windowSize,
+   404→          sigStrikesAbsorbedPerMin: derived.sigStrikesAbsorbedPerMin,
+   405→          strikingDefense: derived.strikingDefense,
+   406→          takedownDefense: derived.takedownDefense,
+   407→          avgFightSeconds: derived.avgFightSeconds,
+   408→          fightsUsed: (JSON.parse(derived.computedFrom ?? '{}') as { used?: string[] }).used?.length ?? 0,
+   409→          fightsSkipped: (JSON.parse(derived.computedFrom ?? '{}') as { skipped?: number }).skipped ?? 0,
+   410→          computedAt: derived.computedAt.toISOString(),
+   411→        }
+   412→      : null,
+   413→    recentHistory: history.slice(0, 10).map((h) => ({
+   414→      eventDate: h.eventDate.toISOString(),
+   415→      eventName: h.eventName,
+   416→      result: h.result,
+   417→      opponentName: h.opponentName,
+   418→      titleFight: h.titleFight === true,
+   419→    })),
+   420→    sourceUrl: f.sourceUrl,
+   421→    lastSyncedAt: f.lastSyncedAt.toISOString(),
+   422→  }
+   423→}
+   424→
+   425→// ---------------------------------------------------------------------------
+   426→// Tableau des données observées
+   427→// ---------------------------------------------------------------------------
+   428→
+   429→function fmt(n: number | null | undefined, unit = '', digits = 2): string {
+   430→  if (n == null || !Number.isFinite(n)) return 'Non disponible'
+   431→  const v = digits === 0 ? String(Math.round(n)) : n.toFixed(digits).replace(/\.?0+$/, '')
+   432→  return `${v}${unit ? ` ${unit}` : ''}`
+   433→}
+   434→
+   435→function buildObservedTable(a: FighterView, b: FighterView): ObservedRow[] {
+   436→  const rows: ObservedRow[] = []
+   437→  const push = (label: string, va: string, vb: string, kind: ObservedRow['kind'], origin: string) =>
+   438→    rows.push({ label, valueA: va, valueB: vb, kind, origin })
+   439→
+   440→  // Fiche
+   441→  push('Âge', a.age != null ? `${a.age} ans` : 'Non disponible', b.age != null ? `${b.age} ans` : 'Non disponible', 'bio', 'ESPN · fiche (âge calculé)')
+   442→  push('Taille', fmt(a.heightCm, 'cm', 1), fmt(b.heightCm, 'cm', 1), 'bio', 'ESPN · fiche (pouces → cm)')
+   443→  push('Allonge', fmt(a.reachCm, 'cm', 1), fmt(b.reachCm, 'cm', 1), 'bio', 'ESPN · fiche (pouces → cm)')
+   444→  push('Garde', a.stance ?? 'Non disponible', b.stance ?? 'Non disponible', 'bio', 'ESPN · fiche combattant')
+   445→  push('Catégorie', a.weightClass ?? 'Non disponible', b.weightClass ?? 'Non disponible', 'bio', 'ESPN · fiche combattant')
+   446→
+   447→  // Palmarès
+   448→  push('Palmarès (V-D-N)',
+   449→    a.record.wins != null ? `${a.record.wins}-${a.record.losses ?? '?'}-${a.record.draws ?? '?'}` : 'Non disponible',
+   450→    b.record.wins != null ? `${b.record.wins}-${b.record.losses ?? '?'}-${b.record.draws ?? '?'}` : 'Non disponible',
+   451→    'record', 'ESPN · palmarès officiel')
+   452→  push('Combat sans décision', String(a.record.noContests ?? 'Non disponible'), String(b.record.noContests ?? 'Non disponible'), 'record', 'ESPN · palmarès officiel')
+   453→  push('Victoires par KO/TKO', String(a.record.winsByKo ?? 'Non disponible'), String(b.record.winsByKo ?? 'Non disponible'), 'record', 'ESPN · palmarès officiel')
+   454→  push('Victoires par soumission', String(a.record.winsBySub ?? 'Non disponible'), String(b.record.winsBySub ?? 'Non disponible'), 'record', 'ESPN · palmarès officiel')
+   455→  push('Forme (5 derniers)',
+   456→    a.lastResults.length ? formFr(a.lastResults) : 'Non disponible',
+   457→    b.lastResults.length ? formFr(b.lastResults) : 'Non disponible',
+   458→    'record', 'ESPN · historique des combats')
+   459→
+   460→  // Stats de carrière
+   461→  const sA = a.stats
+   462→  const sB = b.stats
+   463→  const career = 'ESPN · stats de carrière'
+   464→  push('Frappes significatives portées / min', fmt(sA?.sigStrikesLandedPerMin), fmt(sB?.sigStrikesLandedPerMin), 'career', career)
+   465→  push('Précision des frappes', fmt(sA?.strikingAccuracy, '%', 1), fmt(sB?.strikingAccuracy, '%', 1), 'career', career)
+   466→  push('Takedowns réussis / 15 min', fmt(sA?.takedownsPer15Min), fmt(sB?.takedownsPer15Min), 'career', career)
+   467→  push('Précision des takedowns', fmt(sA?.takedownAccuracy, '%', 1), fmt(sB?.takedownAccuracy, '%', 1), 'career', career)
+   468→  push('Soumissions tentées / 15 min', fmt(sA?.submissionsPer15Min), fmt(sB?.submissionsPer15Min), 'career', career)
+   469→
+   470→  // Dérivés
+   471→  const dA = a.derived
+   472→  const dB = b.derived
+   473→  const derivedLabel = `Calcul VOLTRIX · ${DERIVED_WINDOW} derniers combats (stats par combat ESPN)`
+   474→  push('Frappes significatives reçues / min', fmt(dA?.sigStrikesAbsorbedPerMin), fmt(dB?.sigStrikesAbsorbedPerMin), 'derived', derivedLabel)
+   475→  push('Défense contre les frappes', fmt(dA?.strikingDefense, '%', 1), fmt(dB?.strikingDefense, '%', 1), 'derived', derivedLabel)
+   476→  push('Défense contre les takedowns', fmt(dA?.takedownDefense, '%', 1), fmt(dB?.takedownDefense, '%', 1), 'derived', derivedLabel)
+   477→  push('Temps moyen de combat', dA?.avgFightSeconds != null ? formatDuration(dA.avgFightSeconds) : 'Non disponible', dB?.avgFightSeconds != null ? formatDuration(dB.avgFightSeconds) : 'Non disponible', 'derived', derivedLabel)
+   478→  return rows
+   479→}
+   480→
+   481→/** Forme en notation française : V (victoire), N (nul), D (défaite), NC. */
+   482→export function formFr(results: string[]): string {
+   483→  const map: Record<string, string> = { W: 'V', L: 'D', D: 'N', NC: 'NC' }
+   484→  return results.map((r) => map[r] ?? r).join(' · ')
+   485→}
+   486→
+   487→export function formatDuration(seconds: number): string {
+   488→  const m = Math.floor(seconds / 60)
+   489→  const s = Math.round(seconds % 60)
+   490→  return `${m}:${String(s).padStart(2, '0')}`
+   491→}
+   492→
+   493→// ---------------------------------------------------------------------------
+   494→// Dimensions d'interprétation
+   495→// ---------------------------------------------------------------------------
+   496→
+   497→function edge(a: number | null, b: number | null, lowerBetter = false): { scoreA: number | null; scoreB: number | null; advantage: 'A' | 'B' | '=' | null } {
+   498→  if (a == null || b == null) return { scoreA: null, scoreB: null, advantage: null }
+   499→  if (a === 0 && b === 0) return { scoreA: 50, scoreB: 50, advantage: '=' }
+   500→  const [x, y] = lowerBetter ? [b, a] : [a, b]
+   501→  const shareX = x + y === 0 ? 50 : (x / (x + y)) * 100
+   502→  const scoreA = lowerBetter ? 100 - shareX : shareX
+   503→  const scoreB = 100 - scoreA
+   504→  const advantage = Math.abs(scoreA - scoreB) < 6 ? '=' : scoreA > scoreB ? 'A' : 'B'
+   505→  return { scoreA: round2(scoreA), scoreB: round2(scoreB), advantage }
+   506→}
+   507→
+   508→function buildDimensions(a: FighterView, b: FighterView): DimensionScore[] {
+   509→  const dims: DimensionScore[] = []
+   510→  const add = (
+   511→    key: string,
+   512→    label: string,
+   513→    va: number | null,
+   514→    vb: number | null,
+   515→    detail: (sa: number | null, sb: number | null) => string,
+   516→    basis: string,
+   517→    lowerBetter = false
+   518→  ) => {
+   519→    const e = edge(va, vb, lowerBetter)
+   520→    dims.push({
+   521→      key,
+   522→      label,
+   523→      scoreA: e.scoreA,
+   524→      scoreB: e.scoreB,
+   525→      advantage: e.advantage,
+   526→      detail: detail(va, vb),
+   527→      basis,
+   528→      available: e.advantage !== null,
+   529→    })
+   530→  }
+   531→
+   532→  const career = 'Carrière (ESPN)'
+   533→  const derivedBasis = `${DERIVED_WINDOW} derniers combats (calculé)`
+   534→
+   535→  add('forme', 'Forme récente', formScore(a.lastResults.join(',') || null), formScore(b.lastResults.join(',') || null),
+   536→    (x, y) => `Forme sur 5 combats : ${pct(x)} contre ${pct(y)}`, 'Historique (ESPN)')
+   537→
+   538→  add('volume', 'Volume de frappes', a.stats?.sigStrikesLandedPerMin ?? null, b.stats?.sigStrikesLandedPerMin ?? null,
+   539→    (x, y) => `${fmt(x)} frappe(s) significative(s) par minute contre ${fmt(y)}`, career)
+   540→
+   541→  add('precision', 'Précision des frappes', a.stats?.strikingAccuracy ?? null, b.stats?.strikingAccuracy ?? null,
+   542→    (x, y) => `Précision : ${fmt(x, '%', 1)} contre ${fmt(y, '%', 1)}`, career)
+   543→
+   544→  add('absorption', 'Frappes absorbées', a.derived?.sigStrikesAbsorbedPerMin ?? null, b.derived?.sigStrikesAbsorbedPerMin ?? null,
+   545→    (x, y) => `${fmt(x)} frappe(s) reçue(s) par minute contre ${fmt(y)} (moins = mieux)`, derivedBasis, true)
+   546→
+   547→  add('defense-frappes', 'Défense contre les frappes', a.derived?.strikingDefense ?? null, b.derived?.strikingDefense ?? null,
+   548→    (x, y) => `Défense : ${fmt(x, '%', 1)} contre ${fmt(y, '%', 1)}`, derivedBasis)
+   549→
+   550→  add('lutte', 'Lutte (takedowns)', a.stats?.takedownsPer15Min ?? null, b.stats?.takedownsPer15Min ?? null,
+   551→    (x, y) => `${fmt(x)} takedown(s) par 15 min contre ${fmt(y)}`, career)
+   552→
+   553→  add('defense-takedown', 'Défense contre les takedowns', a.derived?.takedownDefense ?? null, b.derived?.takedownDefense ?? null,
+   554→    (x, y) => `Défense : ${fmt(x, '%', 1)} contre ${fmt(y, '%', 1)}`, derivedBasis)
+   555→
+   556→  add('sol', 'Soumissions', a.stats?.submissionsPer15Min ?? null, b.stats?.submissionsPer15Min ?? null,
+   557→    (x, y) => `${fmt(x)} soumission(s) tentée(s) par 15 min contre ${fmt(y)}`, career)
+   558→
+   559→  add('puissance', 'Pouvoir de finition', a.stats ? (a.stats.koPercentage ?? 0) + (a.stats.tkoPercentage ?? 0) : null,
+   560→    b.stats ? (b.stats.koPercentage ?? 0) + (b.stats.tkoPercentage ?? 0) : null,
+   561→    (x, y) => `${fmt(x, '%', 1)} des combats finis par KO/TKO contre ${fmt(y, '%', 1)}`, career)
+   562→
+   563→  add('experience', 'Expérience', a.totalFights, b.totalFights,
+   564→    (x, y) => `${x ?? '?'} combat(s) disputé(s) contre ${y ?? '?'}`, 'Palmarès (ESPN)')
+   565→
+   566→  add('physique', 'Envergure physique',
+   567→    a.reachCm != null && b.reachCm != null ? a.reachCm : null,
+   568→    a.reachCm != null && b.reachCm != null ? b.reachCm : null,
+   569→    (x, y) => `Allonge : ${fmt(x, 'cm', 1)} contre ${fmt(y, 'cm', 1)}`, 'Fiche (ESPN)')
+   570→
+   571→  return dims
+   572→}
+   573→
+   574→function pct(x: number | null | undefined): string {
+   575→  if (x == null) return 'non disponible'
+   576→  return `${Math.round(x * 100)} %`
+   577→}
+   578→
+   579→// ---------------------------------------------------------------------------
+   580→// Commentaires et limites
+   581→// ---------------------------------------------------------------------------
+   582→
+   583→function buildCommentary(a: FighterView, b: FighterView, dims: DimensionScore[], weightClass: string | null): CommentaryBlock[] {
+   584→  const blocks: CommentaryBlock[] = []
+   585→  const nameA = a.fullName
+   586→  const nameB = b.fullName
+   587→
+   588→  const advA = dims.filter((d) => d.advantage === 'A')
+   589→  const advB = dims.filter((d) => d.advantage === 'B')
+   590→  blocks.push({
+   591→    title: 'Lecture d\'ensemble',
+   592→    text: `Sur les ${dims.filter((d) => d.available).length} dimensions comparables (sur ${dims.length}), ${nameA} présente un écart statistique favorable sur ${advA.length} et ${nameB} sur ${advB.length}${weightClass ? `, en ${weightClass}` : ''}. Ces écarts reflètent les données observées ci-dessus ; ils ne préjugent pas du déroulement du combat.`,
+   593→  })
+   594→
+   595→  for (const d of dims) {
+   596→    if (!d.available || d.advantage === '=' || d.advantage === null) continue
+   597→    const winner = d.advantage === 'A' ? nameA : nameB
+   598→    const loser = d.advantage === 'A' ? nameB : nameA
+   599→    const score = d.advantage === 'A' ? d.scoreA : d.scoreB
+   600→    blocks.push({
+   601→      title: d.label,
+   602→      text: `${d.detail}. Selon les données observées (${d.basis.toLowerCase()}), avantage statistique à ${winner} (indice relatif ${Math.round(score ?? 0)}/100). Cet écart est une lecture descriptive, pas une prédiction — l'adversaire ${loser} conserve des axes de jeu identifiés dans le tableau détaillé.`,
+   603→    })
+   604→  }
+   605→
+   606→  // Styles
+   607→  const styleA = a.fightingStyle ?? 'style non documenté'
+   608→  const styleB = b.fightingStyle ?? 'style non documenté'
+   609→  const stanceA = a.stance ?? 'garde non documentée'
+   610→  const stanceB = b.stance ?? 'garde non documentée'
+   611→  blocks.push({
+   612→    title: 'Analyse des styles',
+   613→    text: `${nameA} est répertorié « ${styleA} » (${stanceA}) ; ${nameB} « ${styleB} » (${stanceB}). ${
+   614→      a.stance && b.stance && a.stance !== b.stance
+   615→        ? 'La différence de garde (orthodoxe contre gaucher ou alterné) produit classiquement des angles d\'attaque inhabituels pour les deux combattants.'
+   616→        : 'Les gardes identiques ou non documentées réduisent cet effet d\'angle.'
+   617→    } ${a.totalFights != null && b.totalFights != null && Math.abs((a.totalFights) - (b.totalFights)) > 8 ? `L\'écart d\'expérience (${a.totalFights} contre ${b.totalFights} combats) peut influer sur la gestion des phases critiques.` : 'Les expériences sont comparables.'}`,
+   618→  })
+   619→  return blocks
+   620→}
+   621→
+   622→function buildLimitations(a: FighterView, b: FighterView): string[] {
+   623→  const lim: string[] = []
+   624→  const missingFor = (f: FighterView): string[] => {
+   625→    const m: string[] = []
+   626→    if (!f.stats) m.push('statistiques de carrière')
+   627→    if (!f.derived) m.push('indicateurs calculés (fenêtre 10 combats)')
+   628→    if (f.age == null) m.push('date de naissance')
+   629→    if (f.reachCm == null) m.push('allonge')
+   630→    if (f.heightCm == null) m.push('taille')
+   631→    if (f.lastResults.length === 0) m.push('forme récente')
+   632→    return m
+   633→  }
+   634→  for (const [f, label] of [[a, a.fullName], [b, b.fullName]] as const) {
+   635→    const m = missingFor(f)
+   636→    if (m.length) lim.push(`${label} : données non disponibles chez la source — ${m.join(', ')}.`)
+   637→  }
+   638→  if (a.derived && a.derived.fightsUsed < DERIVED_WINDOW) {
+   639→    lim.push(`${a.fullName} : indicateurs calculés sur ${a.derived.fightsUsed} combats seulement (fenêtre cible ${DERIVED_WINDOW}).`)
+   640→  }
+   641→  if (b.derived && b.derived.fightsUsed < DERIVED_WINDOW) {
+   642→    lim.push(`${b.fullName} : indicateurs calculés sur ${b.derived.fightsUsed} combats seulement (fenêtre cible ${DERIVED_WINDOW}).`)
+   643→  }
+   644→  lim.push('Les indices relatifs (0-100) comparent les deux combattants entre eux ; ils ne mesurent pas une probabilité de victoire.')
+   645→  lim.push('Aucun système de cotes ni de recommandation de paris n\'est fourni, par conception.')
+   646→  return lim
+   647→}
+   648→
+   649→function buildSources(a: FighterView, b: FighterView, eventName: string): FightAnalysis['sources'] {
+   650→  const src: FightAnalysis['sources'] = []
+   651→  src.push({
+   652→    name: 'ESPN — carte de l\'événement',
+   653→    url: null,
+   654→    detail: `Événement « ${eventName} » : combats, statuts, palmarès affichés`,
+   655→    syncedAt: new Date().toISOString(),
+   656→  })
+   657→  for (const f of [a, b]) {
+   658→    if (f.sourceUrl) {
+   659→      src.push({
+   660→        name: `ESPN — fiche ${f.fullName}`,
+   661→        url: f.sourceUrl,
+   662→        detail: 'Fiche combattant : biographie, palmarès, statistiques de carrière',
+   663→        syncedAt: f.lastSyncedAt,
+   664→      })
+   665→    }
+   666→    if (f.derived) {
+   667→      src.push({
+   668→        name: `VOLTRIX — calcul ${f.fullName}`,
+   669→        url: null,
+   670→        detail: `Frappes reçues/minute, défenses et temps moyen calculés sur ${f.derived.fightsUsed} combats terminés (stats par combat ESPN)`,
+   671→        syncedAt: f.derived.computedAt,
+   672→      })
+   673→    }
+   674→  }
+   675→  return src
+   676→}
+   677→
+   678→function round2(n: number): number {
+   679→  return Math.round(n * 100) / 100
+   680→}
+   681→
